@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: ["main"]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -14,12 +21,16 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
 
       - uses: ./.github/actions/hyper-workspace
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
 
       - name: Install Linux dependencies
         run: |
@@ -31,7 +42,7 @@ jobs:
             libasound2-dev libudev-dev \
             libgtk-3-dev
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Run tests
         run: .github/scripts/test-ci.sh
@@ -40,14 +51,16 @@ jobs:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
 
       - uses: ./.github/actions/hyper-workspace
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
 
       - name: Install Linux dependencies
         run: |
@@ -59,7 +72,7 @@ jobs:
             libasound2-dev libudev-dev \
             libgtk-3-dev
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Run clippy
         run: cargo clippy --locked -- -D warnings
@@ -68,16 +81,18 @@ jobs:
     name: Web demo
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
 
       - uses: ./.github/actions/hyper-workspace
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
+        run: |
+          rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
+          rustup default stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: wasm32-unknown-unknown
 
