@@ -1,8 +1,8 @@
 use super::*;
-use crate::compiler::geometry::conversions::csg_mesh_to_mesh_data;
+use crate::compiler::geometry::conversions::triangle_mesh_to_mesh_data;
 use crate::compiler::{CompilationResult, DEFAULT_SCAD_CODE, MeshData, compile_scad_code};
-use csgrs::csg::CSG;
-use csgrs::mesh::Mesh as CsgMesh;
+use csgrs::TriangleMesh;
+use csgrs::solid::{self, SolidExt};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -92,6 +92,102 @@ difference() {
             );
         }
         CompilationResult::Error(e) => panic!("Compilation failed: {e}"),
+        CompilationResult::Canceled => panic!("Compilation was unexpectedly canceled"),
+    }
+}
+
+#[test]
+fn mixed_dimension_union_matches_openscad_first_child_behavior() {
+    for (code, ignored_dimension) in [
+        ("union() { cube(2); square(2); }", "2D"),
+        ("union() { square(2); cube(2); }", "3D"),
+    ] {
+        match compile_with_timeout(code, 0) {
+            CompilationResult::Success {
+                parts, warnings, ..
+            } => {
+                assert_eq!(parts.len(), 1, "warnings={warnings:?}");
+                assert!(
+                    warnings.iter().any(|warning| {
+                        warning.contains("Mixing 2D and 3D")
+                            && warning.contains(&format!("ignoring {ignored_dimension}"))
+                    }),
+                    "missing OpenSCAD-compatible dimensional warning: {warnings:?}"
+                );
+            }
+            CompilationResult::Error(error) => panic!("Compilation failed: {error}"),
+            CompilationResult::Canceled => panic!("Compilation was unexpectedly canceled"),
+        }
+    }
+}
+
+#[test]
+fn mixed_dimension_intersection_is_empty_like_openscad() {
+    match compile_with_timeout("intersection() { cube(2); square(2); }", 0) {
+        CompilationResult::Success {
+            parts, warnings, ..
+        } => {
+            assert!(parts.is_empty(), "mixed intersection must be empty");
+            assert!(
+                warnings
+                    .iter()
+                    .any(|warning| warning.contains("Mixing 2D and 3D")),
+                "missing OpenSCAD-compatible dimensional warning: {warnings:?}"
+            );
+        }
+        CompilationResult::Error(error) => panic!("Compilation failed: {error}"),
+        CompilationResult::Canceled => panic!("Compilation was unexpectedly canceled"),
+    }
+}
+
+#[test]
+fn top_level_2d_geometry_is_rendered_flat_without_invented_thickness() {
+    match compile_with_timeout("square([2, 3]);", 0) {
+        CompilationResult::Success {
+            parts, warnings, ..
+        } => {
+            assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+            assert_eq!(parts.len(), 1);
+            assert!(!parts[0].indices.is_empty());
+            assert!(
+                parts[0].positions.iter().all(|position| position[1] == 0.0),
+                "OpenSCAD 2D geometry must remain on the Z=0 modeling plane"
+            );
+        }
+        CompilationResult::Error(error) => panic!("Compilation failed: {error}"),
+        CompilationResult::Canceled => panic!("Compilation was unexpectedly canceled"),
+    }
+}
+
+#[test]
+fn collapsed_offset_is_empty_instead_of_preserving_the_input() {
+    match compile_with_timeout("offset(delta = -2) square(1);", 0) {
+        CompilationResult::Success { parts, .. } => {
+            assert!(
+                parts.is_empty(),
+                "an overlarge negative offset must not return the original square"
+            );
+        }
+        CompilationResult::Error(error) => panic!("Compilation failed: {error}"),
+        CompilationResult::Canceled => panic!("Compilation was unexpectedly canceled"),
+    }
+}
+
+#[test]
+fn singular_2d_transform_is_empty_with_a_diagnostic_like_openscad() {
+    match compile_with_timeout("scale([0, 1]) square(1);", 0) {
+        CompilationResult::Success {
+            parts, warnings, ..
+        } => {
+            assert!(parts.is_empty(), "a collapsed 2D region must be empty");
+            assert!(
+                warnings
+                    .iter()
+                    .any(|warning| warning.contains("collapsed or invalidated")),
+                "missing singular-transform diagnostic: {warnings:?}"
+            );
+        }
+        CompilationResult::Error(error) => panic!("Compilation failed: {error}"),
         CompilationResult::Canceled => panic!("Compilation was unexpectedly canceled"),
     }
 }
@@ -419,8 +515,8 @@ fn geb_letter_solids_are_closed() {
 
     for (label, body) in cases {
         let code = format!("{definitions}\n{body}");
-        compile_to_csg_mesh(&code)
-            .to_hypermesh_exact()
+        let mesh = compile_to_triangle_mesh(&code);
+        hypermesh::polygon_soup(&crate::compiler::MESH_CONTEXT, &[mesh.as_ref()])
             .unwrap_or_else(|error| panic!("{label} is not closed: {error}"));
         match compile_with_timeout(&code, 0) {
             CompilationResult::Success {
@@ -477,7 +573,7 @@ rotate(a = 45, v = [1, 0, 0])
     }
 }
 
-fn compile_to_csg_mesh(code: &str) -> CsgMesh<()> {
+fn compile_to_triangle_mesh(code: &str) -> TriangleMesh {
     let _compile_guard = COMPATIBILITY_COMPILE_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -491,20 +587,30 @@ fn compile_to_csg_mesh(code: &str) -> CsgMesh<()> {
     );
     let mut iter = shapes.into_iter();
     let (first, _) = iter.next().unwrap();
-    let mut result = first.into_csg_mesh();
+    let mut result = first
+        .try_into_triangle_mesh()
+        .expect("test helper requires explicit 3D geometry");
     for (shape, _) in iter {
-        result = result.union(&shape.into_csg_mesh());
+        result = result
+            .try_union(
+                &shape
+                    .try_into_triangle_mesh()
+                    .expect("test helper requires explicit 3D geometry"),
+            )
+            .expect("test helper exact union failed");
     }
     result
 }
 
-fn csg_mesh_to_mesh_data_local(mesh: &CsgMesh<()>) -> Result<MeshData, String> {
-    csg_mesh_to_mesh_data(mesh)
-}
-
 fn compile_to_merged_mesh(code: &str) -> MeshData {
     match compile_with_timeout(code, 0) {
-        CompilationResult::Success { parts, .. } => {
+        CompilationResult::Success {
+            parts, warnings, ..
+        } => {
+            assert!(
+                !parts.is_empty(),
+                "No mesh parts produced; warnings={warnings:?}"
+            );
             let mut positions = Vec::new();
             let mut normals = Vec::new();
             let mut indices = Vec::new();
@@ -528,7 +634,7 @@ fn compile_to_merged_mesh(code: &str) -> MeshData {
 
 #[test]
 fn linear_extrude_twist_and_vector_scale_produce_one_manifold() {
-    let mesh = compile_to_csg_mesh(
+    let mesh = compile_to_triangle_mesh(
         r"
         linear_extrude(height = 5, twist = 135, scale = [0.75, 1.25], slices = 12)
             difference() {
@@ -538,22 +644,22 @@ fn linear_extrude_twist_and_vector_scale_produce_one_manifold() {
         ",
     );
 
-    mesh.to_hypermesh_exact()
+    hypermesh::polygon_soup(&crate::compiler::MESH_CONTEXT, &[mesh.as_ref()])
         .expect("twisted vector-scale extrusion should be a closed manifold");
 }
 
 #[test]
 fn exact_240_degree_rotation_places_rocket_fin_in_the_third_sector() {
     for degrees in [0.0_f64, 120.0, 240.0] {
-        let mesh = compile_to_csg_mesh(&format!(
+        let mesh = compile_to_triangle_mesh(&format!(
             "rotate([0, 0, {degrees}]) translate([6, -1, 0]) cube([8, 2, 12]);"
         ));
-        let bounds = mesh.bounding_box();
-        let center_x = ((bounds.mins.x + bounds.maxs.x) / csgrs::Real::from(2))
+        let bounds = solid::bounding_box(&mesh);
+        let center_x = ((&bounds.mins.x + &bounds.maxs.x) / csgrs::Real::from(2))
             .expect("nonzero center divisor")
             .to_f64_lossy()
             .expect("finite center x");
-        let center_y = ((bounds.mins.y + bounds.maxs.y) / csgrs::Real::from(2))
+        let center_y = ((&bounds.mins.y + &bounds.maxs.y) / csgrs::Real::from(2))
             .expect("nonzero center divisor")
             .to_f64_lossy()
             .expect("finite center y");
@@ -566,8 +672,8 @@ fn exact_240_degree_rotation_places_rocket_fin_in_the_third_sector() {
 
 #[test]
 fn rational_arithmetic_reaches_mesh_coordinates_without_float_demotion() {
-    let mesh = compile_to_csg_mesh("cube([1/3 + 1/6, 2/5, 3/7]);");
-    let bounds = mesh.bounding_box();
+    let mesh = compile_to_triangle_mesh("cube([1/3 + 1/6, 2/5, 3/7]);");
+    let bounds = solid::bounding_box(&mesh);
 
     assert_eq!(bounds.maxs.x, "1/2".parse::<csgrs::Real>().unwrap());
     assert_eq!(bounds.maxs.y, "2/5".parse::<csgrs::Real>().unwrap());
@@ -576,8 +682,8 @@ fn rational_arithmetic_reaches_mesh_coordinates_without_float_demotion() {
 
 #[test]
 fn symbolic_constants_and_trig_reach_transforms() {
-    let mesh = compile_to_csg_mesh("translate([cos(60), sin(30), 0]) cube(1/7);");
-    let bounds = mesh.bounding_box();
+    let mesh = compile_to_triangle_mesh("translate([cos(60), sin(30), 0]) cube(1/7);");
+    let bounds = solid::bounding_box(&mesh);
     let half = "1/2".parse::<csgrs::Real>().unwrap();
 
     assert_eq!(bounds.mins.x, half);
@@ -592,7 +698,7 @@ fn symbolic_constants_and_trig_reach_transforms() {
 
 #[test]
 fn rotated_sqrt_two_square_certifies_shared_edge_through_boolean() {
-    let transformed = compile_to_csg_mesh(
+    let transformed = compile_to_triangle_mesh(
         r"
         linear_extrude(height = 1)
             rotate(-45)
@@ -600,18 +706,17 @@ fn rotated_sqrt_two_square_certifies_shared_edge_through_boolean() {
         ",
     );
     let one = csgrs::Real::one();
-    let transformed_corner_is_exact = transformed.triangles().iter().any(|triangle| {
-        triangle
-            .vertices()
-            .iter()
-            .any(|vertex| vertex.position.x == one && vertex.position.y == one)
+    let transformed_corner_is_exact = transformed.triangles.iter().any(|triangle| {
+        triangle.indices().into_iter().any(|index| {
+            transformed.positions[index].x == one && transformed.positions[index].y == one
+        })
     });
     assert!(
         transformed_corner_is_exact,
         "rotate(-45) must carry [0, sqrt(2)] to the exact point [1, 1]"
     );
 
-    let union = compile_to_csg_mesh(
+    let union = compile_to_triangle_mesh(
         r"
         linear_extrude(height = 1)
             union() {
@@ -621,18 +726,17 @@ fn rotated_sqrt_two_square_certifies_shared_edge_through_boolean() {
             }
         ",
     );
-    union
-        .to_hypermesh_exact()
+    hypermesh::polygon_soup(&crate::compiler::MESH_CONTEXT, &[union.as_ref()])
         .expect("the exact shared-edge union should be a closed manifold");
 
     let residual_shared_edge_faces = union
-        .triangles()
+        .triangles
         .iter()
         .filter(|triangle| {
             triangle
-                .vertices()
-                .iter()
-                .all(|vertex| vertex.position.x == vertex.position.y)
+                .indices()
+                .into_iter()
+                .all(|index| union.positions[index].x == union.positions[index].y)
         })
         .count();
     assert_eq!(
@@ -643,7 +747,7 @@ fn rotated_sqrt_two_square_certifies_shared_edge_through_boolean() {
 
 #[test]
 fn touching_cubes_union_removes_internal_face() {
-    let mesh = compile_to_csg_mesh(
+    let mesh = compile_to_triangle_mesh(
         r"
         union() {
             cube([1, 1, 1]);
@@ -652,18 +756,18 @@ fn touching_cubes_union_removes_internal_face() {
         }
         ",
     );
-    mesh.to_hypermesh_exact()
+    hypermesh::polygon_soup(&crate::compiler::MESH_CONTEXT, &[mesh.as_ref()])
         .expect("the touching-cube union should be a closed manifold");
 
     let shared_x = csgrs::Real::one();
     let internal_face_triangles = mesh
-        .triangles()
+        .triangles
         .iter()
         .filter(|triangle| {
             triangle
-                .vertices()
-                .iter()
-                .all(|vertex| vertex.position.x == shared_x)
+                .indices()
+                .into_iter()
+                .all(|index| mesh.positions[index].x == shared_x)
         })
         .count();
     assert_eq!(
@@ -673,8 +777,8 @@ fn touching_cubes_union_removes_internal_face() {
 }
 
 #[test]
-fn polyhedron_with_independently_duplicated_patch_vertices_is_closed() {
-    let mesh = compile_to_csg_mesh(
+fn polyhedron_with_independently_duplicated_patch_vertices_is_boolean_ready() {
+    let mesh = compile_to_triangle_mesh(
         r"
         points = [
             [0, 0, 0], [0, 1, 0], [1, 1, 0], [1, 0, 0],
@@ -695,19 +799,24 @@ fn polyhedron_with_independently_duplicated_patch_vertices_is_closed() {
         polyhedron(points = points, faces = faces);
         ",
     );
-    let indexed = mesh
-        .to_hypermesh_exact()
-        .expect("independently indexed patches should weld into a closed polyhedron");
-
     assert_eq!(
-        indexed.positions.len(),
-        8,
-        "the six independently indexed patches should weld to eight cube vertices"
+        mesh.positions.len(),
+        24,
+        "the native mesh must preserve the authored point rows"
     );
     assert_eq!(
-        indexed.triangles.len(),
+        mesh.triangles.len(),
         12,
         "the six quad patches should triangulate to twelve cube faces"
+    );
+    let separate_cube = solid::cube(csgrs::Real::one()).translated(
+        csgrs::Real::from(2_u8),
+        csgrs::Real::zero(),
+        csgrs::Real::zero(),
+    );
+    assert!(
+        mesh.try_union(&separate_cube).is_ok(),
+        "the exact Boolean boundary must canonicalize coincident point rows"
     );
 }
 
@@ -770,9 +879,44 @@ fn numeric_equality_uses_hyperreal_certification() {
 }
 
 #[test]
+fn expression_edge_cases_match_openscad_without_compacting_invalid_values() {
+    let source = openscad_rs::parse(
+        r#"
+        vector_sum = [1] + [2, 3];
+        table_value = lookup(5, [[10, 100], [0, 0], [5, 50]]);
+        invalid_min = min(1, "x", 2);
+        invalid_norm = norm([3, "x", 4]);
+        invalid_range = [undef:2];
+        "#,
+    )
+    .expect("OpenSCAD expression compatibility source should parse");
+    let mut evaluator = Evaluator::new();
+    evaluator.eval_source_file(&source);
+
+    let Some(Value::List(sum)) = evaluator.variables.get("vector_sum") else {
+        panic!("vector addition should produce a list");
+    };
+    assert_eq!(sum.len(), 1, "OpenSCAD truncates to the shorter vector");
+    assert!(matches!(
+        sum.first(),
+        Some(Value::Number(value)) if value == &csgrs::Real::from(3_u8)
+    ));
+    assert!(matches!(
+        evaluator.variables.get("table_value"),
+        Some(Value::Number(value)) if value == &csgrs::Real::from(50_u8)
+    ));
+    for name in ["invalid_min", "invalid_norm", "invalid_range"] {
+        assert!(
+            matches!(evaluator.variables.get(name), Some(Value::Undef)),
+            "{name} must remain undef"
+        );
+    }
+}
+
+#[test]
 fn decimal_and_scientific_literals_reach_geometry_as_exact_rationals() {
-    let mesh = compile_to_csg_mesh("cube([0.1, 2.5e-1, 3E-1]);");
-    let bounds = mesh.bounding_box();
+    let mesh = compile_to_triangle_mesh("cube([0.1, 2.5e-1, 3E-1]);");
+    let bounds = solid::bounding_box(&mesh);
 
     assert_eq!(bounds.maxs.x, "1/10".parse::<csgrs::Real>().unwrap());
     assert_eq!(bounds.maxs.y, "1/4".parse::<csgrs::Real>().unwrap());
@@ -888,8 +1032,8 @@ hull() {
     translate([0, 30, 0]) cube([30, 4, 30], center=true);
 }
 ";
-    let csg = compile_to_csg_mesh(code);
-    let result = csg_mesh_to_mesh_data_local(&csg).expect("mesh conversion failed");
+    let csg = compile_to_triangle_mesh(code);
+    let result = triangle_mesh_to_mesh_data(&csg).expect("mesh conversion failed");
     assert!(result.positions.len() > 10);
 }
 
@@ -902,8 +1046,8 @@ intersection() {
     translate([-14, -14, -14]) cube([28, 28, 14.4]);
 }
 ";
-    let csg = compile_to_csg_mesh(code);
-    let result = csg_mesh_to_mesh_data_local(&csg).expect("mesh conversion failed");
+    let csg = compile_to_triangle_mesh(code);
+    let result = triangle_mesh_to_mesh_data(&csg).expect("mesh conversion failed");
     assert!(result.positions.len() > 10);
 }
 
@@ -916,9 +1060,9 @@ fn symbolic_rotated_hull_uses_exact_retained_facts() {
             translate([0, 5, 2]) rotate([-35, 0, 0]) cylinder(h=2, r1=2, r2=3);
         }
     ";
-    let mesh = compile_to_csg_mesh(code);
-    assert!(!mesh.triangles().is_empty());
-    let rendered = csg_mesh_to_mesh_data_local(&mesh).expect("mesh conversion failed");
+    let mesh = compile_to_triangle_mesh(code);
+    assert!(!mesh.triangles.is_empty());
+    let rendered = triangle_mesh_to_mesh_data(&mesh).expect("mesh conversion failed");
     assert!(!rendered.indices.is_empty());
 }
 
@@ -939,22 +1083,22 @@ fn test_difference_hull_shapes() {
         translate([0, 25, 10]) rotate([-35, 0, 0]) cylinder(h=9, r1=12.5, r2=20);
         }
     ";
-    let outer_mesh = compile_to_csg_mesh(outer);
-    let inner_mesh = compile_to_csg_mesh(inner);
-    assert!(!outer_mesh.triangles().is_empty(), "outer hull is empty");
-    assert!(!inner_mesh.triangles().is_empty(), "inner hull is empty");
+    let outer_mesh = compile_to_triangle_mesh(outer);
+    let inner_mesh = compile_to_triangle_mesh(inner);
+    assert!(!outer_mesh.triangles.is_empty(), "outer hull is empty");
+    assert!(!inner_mesh.triangles.is_empty(), "inner hull is empty");
 
     let code = format!("difference() {{ {outer} {inner} }}");
-    let csg = compile_to_csg_mesh(&code);
-    let result = csg_mesh_to_mesh_data_local(&csg).expect("mesh conversion failed");
+    let csg = compile_to_triangle_mesh(&code);
+    let result = triangle_mesh_to_mesh_data(&csg).expect("mesh conversion failed");
     assert!(result.positions.len() > 10);
 }
 
 #[test]
 fn test_refill_clip() {
     let code = REFILL_CLIP_CODE;
-    let csg = compile_to_csg_mesh(code);
-    let result = csg_mesh_to_mesh_data_local(&csg).expect("mesh conversion failed");
+    let csg = compile_to_triangle_mesh(code);
+    let result = triangle_mesh_to_mesh_data(&csg).expect("mesh conversion failed");
     assert!(result.positions.len() > 100);
 }
 
@@ -1107,8 +1251,13 @@ fn assert_example_compiles(relative: &str) {
     let path = example_path(relative);
     let code = std::fs::read_to_string(&path).unwrap();
     match compile_with_timeout(&code, 0) {
-        CompilationResult::Success { parts, .. } => {
-            assert!(!parts.is_empty());
+        CompilationResult::Success {
+            parts, warnings, ..
+        } => {
+            assert!(
+                !parts.is_empty(),
+                "{relative}: produced no parts; warnings: {warnings:?}"
+            );
         }
         CompilationResult::Error(e) => panic!("{relative}: compilation failed: {e}"),
         CompilationResult::Canceled => panic!("Compilation was unexpectedly canceled"),
@@ -1186,11 +1335,7 @@ fn assert_csg_example_matches_reference(relative: &str, fn_override: u32) {
     // These fixtures contain several independent curved Booleans. Keep the
     // compatibility test focused on exact CSG topology and bounds at a stable
     // tessellation; high-resolution throughput belongs in the benchmark suite.
-    let timeout = if relative == "Basics/CSG-modules.scad" {
-        std::time::Duration::from_mins(3)
-    } else {
-        std::time::Duration::from_mins(1)
-    };
+    let timeout = std::time::Duration::from_mins(3);
     let parts = match compile_with_deadline(&code, fn_override, timeout) {
         CompilationResult::Success { parts, .. } => parts,
         CompilationResult::Error(error) => panic!("{relative}: compilation failed: {error}"),
@@ -1520,8 +1665,10 @@ fn test_polyhedron_pentagon_faces_standalone() {
         dodecahedron_scad()
     );
     match compile_with_timeout(&code, 0) {
-        CompilationResult::Success { parts, .. } => {
-            assert!(!parts.is_empty());
+        CompilationResult::Success {
+            parts, warnings, ..
+        } => {
+            assert!(!parts.is_empty(), "polyhedron warnings: {warnings:?}");
             let total_tris: usize = parts.iter().map(|p| p.positions.len() / 3).sum();
             assert!(total_tris >= 36);
         }

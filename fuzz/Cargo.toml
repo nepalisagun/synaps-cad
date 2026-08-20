@@ -1,0 +1,85 @@
+[package]
+name = "synaps-cad-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+csgrs = { path = "../../csgrs" }
+hypercurve = { path = "../../hypercurve" }
+hyperlattice = { path = "../../hyperlattice" }
+hyperlimit = { path = "../../hyperlimit" }
+hypermesh = { path = "../../hypermesh" }
+libfuzzer-sys = "0.4"
+openscad-rs = { path = "../../openscad-rs" }
+synaps-cad = { path = "..", features = ["fuzz-bounded-campaign"] }
+
+[patch.crates-io]
+hypercurve = { path = "../../hypercurve" }
+hyperlattice = { path = "../../hyperlattice" }
+hyperlimit = { path = "../../hyperlimit" }
+hypermesh = { path = "../../hypermesh" }
+hyperphysics = { path = "../../hyperphysics" }
+hyperreal = { path = "../../hyperreal" }
+hypersdf = { path = "../../hypersdf" }
+hypersolve = { path = "../../hypersolve" }
+hypertri = { path = "../../hypertri" }
+
+[[bin]]
+name = "fuzz_compile_arbitrary"
+path = "fuzz_targets/fuzz_compile_arbitrary.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_compile_structured"
+path = "fuzz_targets/fuzz_compile_structured.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_expression_control"
+path = "fuzz_targets/fuzz_expression_control.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_shape_operations"
+path = "fuzz_targets/fuzz_shape_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_shape_catalog"
+path = "fuzz_targets/fuzz_shape_catalog.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_mesh_conversion"
+path = "fuzz_targets/fuzz_mesh_conversion.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_text_pipeline"
+path = "fuzz_targets/fuzz_text_pipeline.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_full_pipeline"
+path = "fuzz_targets/fuzz_full_pipeline.rs"
+test = false
+doc = false
+bench = false

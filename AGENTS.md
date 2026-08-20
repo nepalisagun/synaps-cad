@@ -47,6 +47,7 @@ Code Editor (auto-apply)
 | `src/main.rs`       | App entry point, registers all plugins                                                                                      |
 | `src/app_config.rs` | Developer constants (not user-facing)                                                                                       |
 | `benches/compile_default.rs` | Default-scene compiler benchmark with phase timing and optional `dispatch-trace` instrumentation.                 |
+| `fuzz/`             | Bounded parser, evaluator, exact geometry, conversion, text, and full-pipeline fuzz campaigns.                              |
 | `web/index.html`    | Static HTML shell for the WASM build                                                                                        |
 | `.github/scripts/build-web.sh` | Builds and validates the complete static web bundle using the `wasm-bindgen` version in `Cargo.lock`             |
 | `.github/workflows/pages.yml` | Builds the WASM target, runs `wasm-bindgen`, and deploys the static bundle to GitHub Pages                       |
@@ -182,6 +183,7 @@ The WASM build supports browser file picking for image attachments via `rfd::Asy
 - **Reference comparison tests**: compare output bounding box and triangle count against OpenSCAD reference data
 - **No-panic tests**: for features using dependencies with known issues (spade, csgrs), verify they don't crash
 - **Unit tests**: for specific compiler features (cones, polyhedra, boolean ops)
+- **Fuzz targets**: compile every target in CI; use bounded sanitizer campaigns for parser, evaluator, exact geometry, conversion, text, and previews
 
 **Visual verification is mandatory.** When implementing or fixing rendering features (text, extrusion, boolean ops, transforms, etc.), you **must** visually compare SynapsCAD's output with OpenSCAD's output for the same code. Do not rely solely on bounding-box or triangle-count tests — they can pass while the rendering is visibly wrong. Render the code in both OpenSCAD and SynapsCAD, compare the results, and only consider the feature correct when they match visually.
 

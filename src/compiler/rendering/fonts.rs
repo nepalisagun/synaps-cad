@@ -1,6 +1,6 @@
-use csgrs::Profile;
 use csgrs::Real;
-use csgrs::csg::CSG;
+use csgrs::curve::{self, CurveRegionExt};
+use hypercurve::CurveRegion2;
 
 /// Bundled Liberation Sans Regular font data.
 const LIBERATION_SANS_REGULAR: &[u8] =
@@ -118,12 +118,23 @@ fn search_font_dir(
     None
 }
 
-pub fn apply_text_alignment(sketch: Profile, halign: &str, valign: &str) -> Profile {
-    if sketch.is_empty() {
-        return sketch;
+/// Applies OpenSCAD-compatible horizontal and vertical text alignment.
+///
+/// # Errors
+///
+/// Returns an error when exact bounds or translation of the text region cannot
+/// be certified.
+pub fn apply_text_alignment(
+    region: CurveRegion2,
+    halign: &str,
+    valign: &str,
+) -> Result<CurveRegion2, String> {
+    if region.is_empty() {
+        return Ok(region);
     }
 
-    let bounds = sketch.bounding_box();
+    let bounds = curve::try_bounding_box(&region)
+        .map_err(|error| format!("exact text bounds failed: {error}"))?;
     let min_x = bounds.mins.x;
     let max_x = bounds.maxs.x;
     let min_y = bounds.mins.y;
@@ -145,21 +156,31 @@ pub fn apply_text_alignment(sketch: Profile, halign: &str, valign: &str) -> Prof
         _ => Real::zero(),
     };
 
-    if dx == Real::zero() && dy == Real::zero() {
-        sketch
+    if hyperlimit::classify_real_sign(&dx, crate::compiler::PREDICATE_POLICY).value()
+        == Some(hyperlimit::Sign::Zero)
+        && hyperlimit::classify_real_sign(&dy, crate::compiler::PREDICATE_POLICY).value()
+            == Some(hyperlimit::Sign::Zero)
+    {
+        Ok(region)
     } else {
-        sketch.translate(dx, dy, Real::zero())
+        curve::try_translated(&region, dx, dy)
+            .map_err(|error| format!("exact text alignment failed: {error}"))
     }
 }
 
 /// Renders text per glyph so spacing and direction use the font's metrics.
+/// Builds one exact filled curve region for directional text.
+///
+/// # Errors
+///
+/// Returns an error when exact glyph-region union fails.
 pub fn render_text_with_direction(
     text: &str,
     font_data: &[u8],
     size: &Real,
     spacing: &Real,
     direction: &str,
-) -> Profile {
+) -> Result<CurveRegion2, String> {
     // OpenSCAD accepts ltr, rtl, ttb, and btt and dispatches on the first
     // character, matching HarfBuzz direction parsing.
     let dir = match direction.chars().next() {
@@ -170,7 +191,7 @@ pub fn render_text_with_direction(
     };
 
     let Ok(face) = ttf_parser::Face::parse(font_data, 0) else {
-        return Profile::new();
+        return Ok(CurveRegion2::empty());
     };
 
     let upem = Real::from(face.units_per_em());
@@ -204,7 +225,7 @@ pub fn render_text_with_direction(
         text.chars().collect()
     };
 
-    let mut combined: Option<Profile> = None;
+    let mut combined: Option<CurveRegion2> = None;
     let mut cursor = Real::zero();
 
     for ch in &chars {
@@ -239,21 +260,26 @@ pub fn render_text_with_direction(
             .is_some();
 
         if has_outline {
-            let glyph = Profile::text(&ch.to_string(), font_data, corrected_size.clone());
+            let glyph = curve::truetype_text(&ch.to_string(), font_data, corrected_size.clone());
             let positioned = if is_vertical {
                 // Vertical text extends down from the ascent line and centers
                 // each glyph on the text axis.
-                glyph.translate(
+                curve::try_translated(
+                    &glyph,
                     -(advance.clone() / Real::from(2_u8)).unwrap_or_else(|_| Real::zero()),
                     -(&cursor + &ascender),
-                    Real::zero(),
                 )
+                .map_err(|error| format!("exact vertical glyph placement failed: {error}"))?
             } else {
-                glyph.translate(cursor.clone(), Real::zero(), Real::zero())
+                curve::try_translated(&glyph, cursor.clone(), Real::zero())
+                    .map_err(|error| format!("exact glyph placement failed: {error}"))?
             };
 
             combined = Some(match combined {
-                Some(acc) => acc.union(&positioned),
+                Some(acc) => acc
+                    .try_union(&positioned, &hypercurve::CurvePolicy::STRICT)
+                    .map(hypercurve::CurveOutcome::into_value)
+                    .map_err(|error| format!("exact text glyph union failed: {error}"))?,
                 None => positioned,
             });
         }
@@ -265,5 +291,5 @@ pub fn render_text_with_direction(
         }
     }
 
-    combined.unwrap_or_else(Profile::new)
+    Ok(combined.unwrap_or_else(CurveRegion2::empty))
 }

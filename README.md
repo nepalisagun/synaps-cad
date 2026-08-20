@@ -95,7 +95,7 @@ translate([cos(60), sin(30), PI])
 | --- | --- | --- |
 | Parsing | `openscad_rs::parse` | OpenSCAD source to a typed syntax tree |
 | Evaluation | `Evaluator`, `Value`, `Shape` | Expressions, modules, primitives, transformations, and CSG |
-| Geometry | `csgrs` and the Hyper stack | Exact profiles, meshes, booleans, offsets, and tessellation |
+| Geometry | `csgrs` and the Hyper stack | Exact curve regions, triangle meshes, booleans, offsets, and tessellation |
 | Compilation | `compile_scad_code` | Mesh conversion, diagnostics, and orthographic previews |
 | Application | Bevy 0.15 and `bevy_egui` | Editor, viewport, picking, camera, persistence, and export |
 | AI | `genai` or browser HTTP | Model discovery, streaming edits, and verification rounds |
@@ -129,7 +129,12 @@ cargo fmt --all -- --check
 cargo clippy --locked -- -D warnings
 .github/scripts/test-ci.sh
 cargo build --locked --release
+cargo check --manifest-path fuzz/Cargo.toml --bins --locked
 ```
+
+The compiler, evaluator, exact curve/mesh operations, renderer conversion,
+text, and full preview pipeline have bounded `cargo-fuzz` campaigns. See
+[fuzz/README.md](fuzz/README.md) for the complete target matrix.
 
 Build the static web application with the exact `wasm-bindgen-cli` version recorded in `Cargo.lock`:
 
@@ -157,7 +162,7 @@ The compatibility corpus under `tests/openscad_examples` originates from OpenSCA
 
 ## Hyper ecosystem
 
-SynapsCAD builds on [`csgrs`](https://github.com/timschmidt/csgrs), [`hyperreal`](https://github.com/timschmidt/hyperreal), [`hypercurve`](https://github.com/timschmidt/hypercurve), [`hypermesh`](https://github.com/timschmidt/hypermesh), [`hypertriangulate`](https://github.com/timschmidt/hypertriangulate), and [`hyperlattice`](https://github.com/timschmidt/hyperlattice). Their READMEs describe the exact-number, curve, topology, triangulation, and spatial-indexing layers in more detail.
+SynapsCAD builds on [`csgrs`](https://github.com/timschmidt/csgrs), [`hyperreal`](https://github.com/timschmidt/hyperreal), [`hypercurve`](https://github.com/timschmidt/hypercurve), [`hypermesh`](https://github.com/timschmidt/hypermesh), [`hypertri`](https://github.com/timschmidt/hypertri), and [`hyperlattice`](https://github.com/timschmidt/hyperlattice). Their READMEs describe the exact-number, curve, topology, triangulation, and spatial-indexing layers in more detail.
 
 ## License and contact
 

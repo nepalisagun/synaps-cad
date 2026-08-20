@@ -1,10 +1,10 @@
-use csgrs::Real;
+use csgrs::{Real, solid};
 use openscad_rs::ast::{Argument, Expr, Parameter, SourceFile, Statement};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::geometry::{BoolOp, Shape, TransformKind};
+use super::geometry::{BoolOp, Shape, ShapeDimension, TransformKind};
 
 pub mod value;
 pub use value::Value;
@@ -104,13 +104,13 @@ impl Evaluator {
 
     /// Resolves `$fn`, falling back to `$fa` and `$fs` as `OpenSCAD` does.
     #[must_use]
-    pub fn resolve_fn(&self, args: &[(Option<String>, Value)]) -> usize {
+    pub fn resolve_fn(&mut self, args: &[(Option<String>, Value)]) -> usize {
         self.resolve_fn_with_radius(args, None)
     }
 
     #[allow(clippy::similar_names)]
     pub fn resolve_fn_with_radius(
-        &self,
+        &mut self,
         args: &[(Option<String>, Value)],
         r: Option<&Real>,
     ) -> usize {
@@ -119,10 +119,13 @@ impl Evaluator {
             .or_else(|| self.variables.get("$fn").and_then(Value::as_real))
             .unwrap_or_else(Real::zero);
 
-        if fn_val > Real::zero()
+        if value::compare_reals(&fn_val, &Real::zero()) == Some(std::cmp::Ordering::Greater)
             && let Ok(integer) = fn_val.floor_certified()
             && let Ok(value) = usize::try_from(integer)
         {
+            #[cfg(feature = "fuzz-bounded-campaign")]
+            return value.min(32);
+            #[cfg(not(feature = "fuzz-bounded-campaign"))]
             return value;
         }
 
@@ -138,31 +141,99 @@ impl Evaluator {
             .unwrap_or_else(|| Real::from(2_u8));
 
         // Bound both controls away from zero to keep tessellation finite.
-        let minimum_control = (Real::one() / Real::from(100_u8)).unwrap_or_else(|_| Real::zero());
-        let fa = fa.max(&minimum_control);
-        let fs = fs.max(&minimum_control);
-        let from_fa = (Real::from(360_u16) / fa).unwrap_or_else(|_| Real::from(5_u8));
+        let Ok(minimum_control) = Real::one() / Real::from(100_u8) else {
+            self.warnings
+                .push("could not construct the exact tessellation-control minimum".into());
+            return 5;
+        };
+        let fa = if let Some(value) =
+            hyperlimit::real_max(&fa, &minimum_control, crate::compiler::PREDICATE_POLICY).value()
+        {
+            value.clone()
+        } else {
+            self.warnings.push(
+                "$fa lower-bound decision is undecided; using OpenSCAD's minimum control".into(),
+            );
+            minimum_control.clone()
+        };
+        let fs = if let Some(value) =
+            hyperlimit::real_max(&fs, &minimum_control, crate::compiler::PREDICATE_POLICY).value()
+        {
+            value.clone()
+        } else {
+            self.warnings.push(
+                "$fs lower-bound decision is undecided; using OpenSCAD's minimum control".into(),
+            );
+            minimum_control
+        };
+        let from_fa = match Real::from(360_u16) / fa {
+            Ok(value) => value,
+            Err(error) => {
+                self.warnings
+                    .push(format!("$fa tessellation calculation failed: {error}"));
+                Real::from(5_u8)
+            }
+        };
 
-        let fragments = r.map_or_else(
-            || from_fa.clone(),
-            |radius| {
-                if radius == &Real::zero() {
-                    Real::from(3_u8)
+        let fragments = match r {
+            None => from_fa,
+            Some(radius) if value::reals_equal(radius, &Real::zero()) == Some(true) => {
+                Real::from(3_u8)
+            }
+            Some(radius) => {
+                let circumference = radius.abs() * Real::from(2_u8) * Real::pi();
+                let from_fs = match circumference / fs {
+                    Ok(value) => value,
+                    Err(error) => {
+                        self.warnings
+                            .push(format!("$fs tessellation calculation failed: {error}"));
+                        Real::from(5_u8)
+                    }
+                };
+                if let Some(value) =
+                    hyperlimit::real_min(&from_fa, &from_fs, crate::compiler::PREDICATE_POLICY)
+                        .value()
+                {
+                    value.clone()
                 } else {
-                    let circumference = radius.abs() * Real::from(2_u8) * Real::pi();
-                    let from_fs = (circumference / fs).unwrap_or_else(|_| Real::from(5_u8));
-                    from_fa.min(&from_fs).clone()
+                    self.warnings.push(
+                        "$fa/$fs tessellation minimum is undecided; using the $fa result".into(),
+                    );
+                    from_fa
                 }
-            },
-        );
+            }
+        };
 
         let minimum_fragments = Real::from(5_u8);
-        let fragments = fragments.max(&minimum_fragments);
-        fragments
+        let fragments = if let Some(value) = hyperlimit::real_max(
+            &fragments,
+            &minimum_fragments,
+            crate::compiler::PREDICATE_POLICY,
+        )
+        .value()
+        {
+            value.clone()
+        } else {
+            self.warnings.push(
+                "fragment-count lower-bound decision is undecided; using five fragments".into(),
+            );
+            minimum_fragments
+        };
+        let Some(fragments) = fragments
             .ceil_certified()
             .ok()
             .and_then(|integer| usize::try_from(integer).ok())
-            .unwrap_or(5)
+        else {
+            self.warnings.push(
+                "fragment count is not representable as a nonnegative machine integer; using five"
+                    .into(),
+            );
+            return 5;
+        };
+        #[cfg(feature = "fuzz-bounded-campaign")]
+        return fragments.min(32);
+        #[cfg(not(feature = "fuzz-bounded-campaign"))]
+        fragments
     }
 
     pub fn eval_source_file(&mut self, source_file: &SourceFile) -> Vec<(Shape, Option<[f32; 3]>)> {
@@ -326,7 +397,14 @@ impl Evaluator {
         }
 
         let (name, range_val) = &loop_vars[depth];
-        let items = range_val.to_iterable();
+        let items = match range_val.to_iterable() {
+            Ok(items) => items,
+            Err(error) => {
+                self.warnings
+                    .push(format!("for-loop iterable could not be decided: {error}"));
+                Vec::new()
+            }
+        };
         let saved = self.variables.get(name).cloned();
 
         let mut results = Vec::new();
@@ -387,12 +465,10 @@ impl Evaluator {
     ) -> Vec<(Shape, Option<[f32; 3]>)> {
         let cond_val = self.eval_expr(condition);
 
-        if cond_val.as_bool() {
-            self.eval_statement_list(then_body)
-        } else if let Some(eb) = else_body {
-            self.eval_statement_list(eb)
-        } else {
-            Vec::new()
+        match self.decide_truthiness(&cond_val, "if() condition") {
+            Some(true) => self.eval_statement_list(then_body),
+            Some(false) => else_body.map_or_else(Vec::new, |eb| self.eval_statement_list(eb)),
+            None => Vec::new(),
         }
     }
 
@@ -531,7 +607,7 @@ impl Evaluator {
             let mut iter = meshes.into_iter();
             let (mut result, _) = iter.next().unwrap();
             for (m, _) in iter {
-                result = result.union(m);
+                result = self.apply_boolean(result, m, BoolOp::Union);
             }
             Some(result)
         }
@@ -609,9 +685,51 @@ impl Evaluator {
                 let child_shapes = self.eval_children(children);
                 if child_shapes.len() >= 2 {
                     let mut iter = child_shapes.into_iter();
-                    let base = iter.next().unwrap().into_csg_mesh();
-                    let tool = iter.next().unwrap().into_csg_mesh();
-                    Some(Shape::from_csg_mesh(base.minkowski_sum(&tool, ())))
+                    let first = iter.next().unwrap();
+                    let Some(dimension) = first.dimension() else {
+                        return Some(first);
+                    };
+                    if dimension == ShapeDimension::Two {
+                        Some(Shape::Failed(
+                            "exact 2D minkowski() is not supported; the input was not extruded"
+                                .into(),
+                        ))
+                    } else {
+                        let mut result = match first.try_into_triangle_mesh() {
+                            Ok(mesh) => mesh,
+                            Err(error) => {
+                                return Some(Shape::Failed(format!("minkowski() failed: {error}")));
+                            }
+                        };
+                        for child in iter {
+                            let Some(child_dimension) = child.dimension() else {
+                                return Some(child);
+                            };
+                            if child_dimension != dimension {
+                                self.warnings.push(format!(
+                                    "Mixing 2D and 3D objects is not supported; ignoring {child_dimension} child object for {dimension} minkowski"
+                                ));
+                                continue;
+                            }
+                            let tool = match child.try_into_triangle_mesh() {
+                                Ok(mesh) => mesh,
+                                Err(error) => {
+                                    return Some(Shape::Failed(format!(
+                                        "minkowski() failed: {error}"
+                                    )));
+                                }
+                            };
+                            result = match solid::minkowski_sum(&result, &tool) {
+                                Ok(mesh) => mesh,
+                                Err(error) => {
+                                    return Some(Shape::Failed(format!(
+                                        "minkowski() failed: {error}"
+                                    )));
+                                }
+                            };
+                        }
+                        Some(Shape::from_triangle_mesh(result))
+                    }
                 } else {
                     self.eval_passthrough_children(children)
                 }
@@ -625,7 +743,7 @@ impl Evaluator {
                 let mut iter = shapes.into_iter();
                 let mut result = iter.next()?;
                 for shape in iter {
-                    result = result.union(shape);
+                    result = self.apply_boolean(result, shape, BoolOp::Union);
                 }
                 Some(result)
             }
@@ -685,13 +803,37 @@ impl Evaluator {
         Self::get_arg(args, name, pos).and_then(Value::as_real)
     }
 
+    /// Reads an optional Boolean argument using exact truthiness.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the argument's truthiness remains undecided under
+    /// the configured exactness policy.
     pub fn get_arg_bool(
         args: &[(Option<String>, Value)],
         name: &str,
         pos: usize,
         default: bool,
-    ) -> bool {
-        Self::get_arg(args, name, pos).map_or(default, Value::as_bool)
+    ) -> Result<bool, String> {
+        Self::get_arg(args, name, pos).map_or(Ok(default), |value| {
+            value.try_as_bool().ok_or_else(|| {
+                let label = if name.is_empty() {
+                    format!("positional argument {pos}")
+                } else {
+                    format!("argument {name}")
+                };
+                format!("{label} truthiness is undecided")
+            })
+        })
+    }
+
+    pub(super) fn decide_truthiness(&mut self, value: &Value, context: &str) -> Option<bool> {
+        value.try_as_bool().or_else(|| {
+            self.warnings.push(format!(
+                "{context} is undecided after the centralized exactness policy"
+            ));
+            None
+        })
     }
 
     #[allow(clippy::missing_panics_doc)]
@@ -707,7 +849,7 @@ impl Evaluator {
                 let mut iter = shapes.into_iter().map(|(s, _)| s);
                 let mut merged = iter.next().unwrap();
                 for s in iter {
-                    merged = merged.union(s);
+                    merged = self.apply_boolean(merged, s, BoolOp::Union);
                 }
                 result.push(merged);
             }
@@ -767,7 +909,7 @@ impl Evaluator {
         let mut iter = child_shapes.into_iter();
         let mut result = iter.next().unwrap();
         for child in iter {
-            result = result.union(child);
+            result = self.apply_boolean(result, child, BoolOp::Union);
         }
         Some(result)
     }

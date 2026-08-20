@@ -1,11 +1,5 @@
-use csgrs::PolygonMesh;
-use csgrs::Profile;
 use csgrs::Real;
-use csgrs::csg::CSG;
-use csgrs::mesh::Mesh as CsgMesh;
-use csgrs::polygon_mesh::Polygon;
-use csgrs::vertex::Vertex;
-use hyperlattice::{Point3, Vector3};
+use csgrs::{curve, solid};
 
 use super::{Evaluator, Value};
 use crate::compiler::geometry::Shape;
@@ -13,24 +7,27 @@ use crate::compiler::rendering::fonts::{
     apply_text_alignment, render_text_with_direction, resolve_font_data,
 };
 
-fn point_from_real(point: &[Real; 3]) -> Point3 {
-    Point3::new(point[0].clone(), point[1].clone(), point[2].clone())
-}
-
 impl Evaluator {
-    #[allow(clippy::unused_self)]
-    pub fn eval_cube(&self, args: &[(Option<String>, Value)]) -> Option<Shape> {
+    pub fn eval_cube(&mut self, args: &[(Option<String>, Value)]) -> Option<Shape> {
         let default_size = Value::Number(Real::one());
         let size_val = Self::get_arg(args, "size", 0).unwrap_or(&default_size);
-        let center = Self::get_arg_bool(args, "center", 1, false);
+        let center = match Self::get_arg_bool(args, "center", 1, false) {
+            Ok(value) => value,
+            Err(error) => return Some(Shape::Failed(format!("cube() failed: {error}"))),
+        };
 
         let mesh = match size_val {
             Value::Number(_) => {
-                let m = CsgMesh::cube(size_val.as_real()?, ());
-                if center { m.center() } else { m }
+                let mesh = solid::cube(size_val.as_real()?);
+                if center { solid::center(&mesh) } else { mesh }
             }
             Value::List(dims) => {
-                let nums: Vec<Real> = dims.iter().filter_map(Value::as_real).collect();
+                let Some(nums): Option<Vec<Real>> = dims.iter().map(Value::as_real).collect()
+                else {
+                    return Some(Shape::Failed(
+                        "cube() size vector must contain only numbers".into(),
+                    ));
+                };
                 let (x, y, z) = match nums.len() {
                     1 => (nums[0].clone(), nums[0].clone(), nums[0].clone()),
                     2 => (nums[0].clone(), nums[1].clone(), Real::one()),
@@ -40,17 +37,17 @@ impl Evaluator {
                         nums.get(2).cloned().unwrap_or_else(Real::one),
                     ),
                 };
-                let m = CsgMesh::cube(Real::one(), ()).scale(x, y, z);
-                if center { m.center() } else { m }
+                let mesh = solid::cuboid(x, y, z);
+                if center { solid::center(&mesh) } else { mesh }
             }
             _ => return None,
         };
 
-        Some(Shape::from_csg_mesh(mesh))
+        Some(Shape::from_triangle_mesh(mesh))
     }
 
     #[must_use]
-    pub fn eval_sphere(&self, args: &[(Option<String>, Value)]) -> Option<Shape> {
+    pub fn eval_sphere(&mut self, args: &[(Option<String>, Value)]) -> Option<Shape> {
         let r = Self::get_arg_real(args, "r", 0)
             .or_else(|| Self::get_arg_real(args, "d", 0).and_then(|d| (d / Real::from(2_u8)).ok()))
             .unwrap_or_else(Real::one);
@@ -58,11 +55,11 @@ impl Evaluator {
         let slices = self.resolve_fn_with_radius(args, Some(&r));
         let stacks = slices / 2;
 
-        Some(Shape::from_csg_mesh(CsgMesh::sphere(r, slices, stacks, ())))
+        Some(Shape::from_triangle_mesh(solid::sphere(r, slices, stacks)))
     }
 
     #[must_use]
-    pub fn eval_cylinder(&self, args: &[(Option<String>, Value)]) -> Option<Shape> {
+    pub fn eval_cylinder(&mut self, args: &[(Option<String>, Value)]) -> Option<Shape> {
         let h = Self::get_arg_real(args, "h", 0)
             .or_else(|| Self::get_arg_real(args, "height", 0))
             .unwrap_or_else(Real::one);
@@ -78,20 +75,26 @@ impl Evaluator {
             .or_else(|| Self::get_arg_real(args, "d2", 99).and_then(half))
             .unwrap_or_else(|| r1.clone());
 
-        let center = Self::get_arg_bool(args, "center", 99, false);
+        let center = match Self::get_arg_bool(args, "center", 99, false) {
+            Ok(value) => value,
+            Err(error) => return Some(Shape::Failed(format!("cylinder() failed: {error}"))),
+        };
         // Tessellation follows the larger endpoint radius.
-        let max_radius = r1.max(&r2);
-        let slices = self.resolve_fn_with_radius(args, Some(max_radius));
+        let max_radius = hyperlimit::real_max(&r1, &r2, crate::compiler::PREDICATE_POLICY)
+            .value()
+            .cloned()
+            .unwrap_or_else(|| r1.abs() + r2.abs());
+        let slices = self.resolve_fn_with_radius(args, Some(&max_radius));
 
         // `frustum` handles zero-radius cone tips without degenerate quads.
-        let m = if r1 == r2 {
-            CsgMesh::cylinder(r1, h, slices, ())
+        let m = if super::value::reals_equal(&r1, &r2) == Some(true) {
+            solid::cylinder(r1, h, slices)
         } else {
-            CsgMesh::frustum(r1, r2, h, slices, ())
+            solid::frustum(r1, r2, h, slices)
         };
-        let m = if center { m.center() } else { m };
+        let m = if center { solid::center(&m) } else { m };
 
-        Some(Shape::from_csg_mesh(m))
+        Some(Shape::from_triangle_mesh(m))
     }
 
     #[allow(
@@ -106,29 +109,37 @@ impl Evaluator {
         let faces_val =
             Self::get_arg(args, "faces", 1).or_else(|| Self::get_arg(args, "triangles", 1));
 
-        let points: Vec<[Real; 3]> = points_val
+        let Some(points) = points_val
             .as_list()?
             .iter()
-            .filter_map(|v| {
-                let nums = v.to_real_list()?;
-                if nums.len() >= 3 {
-                    Some([nums[0].clone(), nums[1].clone(), nums[2].clone()])
-                } else {
-                    None
-                }
+            .map(|value| {
+                let numbers = value.to_real_list()?;
+                (numbers.len() >= 3)
+                    .then(|| [numbers[0].clone(), numbers[1].clone(), numbers[2].clone()])
             })
-            .collect();
+            .collect::<Option<Vec<[Real; 3]>>>()
+        else {
+            return Some(Shape::Failed(
+                "polyhedron() points must be numeric 3D vectors".into(),
+            ));
+        };
 
-        let faces: Vec<Vec<usize>> = faces_val?
+        let Some(faces) = faces_val?
             .as_list()?
             .iter()
-            .filter_map(|v| {
-                v.as_list()?
+            .map(|value| {
+                value
+                    .as_list()?
                     .iter()
                     .map(Value::to_usize_exact)
                     .collect::<Option<Vec<_>>>()
             })
-            .collect();
+            .collect::<Option<Vec<Vec<usize>>>>()
+        else {
+            return Some(Shape::Failed(
+                "polyhedron() faces must be vectors of nonnegative exact integers".into(),
+            ));
+        };
 
         let faces = {
             let mut seen = std::collections::HashSet::new();
@@ -153,89 +164,76 @@ impl Evaluator {
             deduped
         };
 
-        let mut polygons = Vec::new();
-        for face in &faces {
-            if face.len() < 3 {
-                continue;
-            }
-            let pts: Vec<_> = face.iter().filter_map(|&idx| points.get(idx)).collect();
-            if pts.len() < 3 {
-                continue;
-            }
-            let edge = |from: &[Real; 3], to: &[Real; 3]| {
-                Vector3::new([&to[0] - &from[0], &to[1] - &from[1], &to[2] - &from[2]])
-            };
-            let normal = edge(pts[0], pts[1])
-                .cross(&edge(pts[0], pts[2]))
-                .normalize()
-                .unwrap_or_else(|_| Vector3::zero());
-
-            let vertices = pts
-                .iter()
-                .map(|point| Vertex::new(point_from_real(point), normal.clone()))
-                .collect();
-            polygons.push(Polygon::new(vertices, ()));
-        }
-
-        if polygons.is_empty() {
+        if faces.is_empty() {
             return None;
         }
-        let mesh = PolygonMesh::from_polygons(polygons).triangulate();
-        Some(Shape::from_csg_mesh(mesh))
+        let face_refs = faces.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        Some(match solid::polyhedron(&points, &face_refs) {
+            Ok(mesh) => Shape::from_triangle_mesh(mesh),
+            Err(error) => Shape::Failed(format!("polyhedron() failed: {error}")),
+        })
     }
 
     #[must_use]
-    pub fn eval_circle(&self, args: &[(Option<String>, Value)]) -> Option<Shape> {
+    pub fn eval_circle(&mut self, args: &[(Option<String>, Value)]) -> Option<Shape> {
         let r = Self::get_arg_real(args, "r", 0)
             .or_else(|| Self::get_arg_real(args, "d", 0).and_then(|d| (d / Real::from(2_u8)).ok()))
             .unwrap_or_else(Real::one);
 
         let slices = self.resolve_fn_with_radius(args, Some(&r));
-        Some(Shape::Sketch2D(Profile::circle(r, slices)))
+        Some(Shape::CurveRegion2D(curve::circle(r, slices)))
     }
 
-    #[allow(clippy::unused_self)]
-    pub fn eval_square(&self, args: &[(Option<String>, Value)]) -> Option<Shape> {
+    pub fn eval_square(&mut self, args: &[(Option<String>, Value)]) -> Option<Shape> {
         let default_size = Value::Number(Real::one());
         let size_val = Self::get_arg(args, "size", 0).unwrap_or(&default_size);
-        let center = Self::get_arg_bool(args, "center", 1, false);
+        let center = match Self::get_arg_bool(args, "center", 1, false) {
+            Ok(value) => value,
+            Err(error) => return Some(Shape::Failed(format!("square() failed: {error}"))),
+        };
 
-        let sketch = match size_val {
-            Value::Number(_) => Profile::square(size_val.as_real()?),
+        let region = match size_val {
+            Value::Number(_) => curve::square(size_val.as_real()?),
             Value::List(dims) => {
-                let nums: Vec<Real> = dims.iter().filter_map(Value::as_real).collect();
+                let Some(nums): Option<Vec<Real>> = dims.iter().map(Value::as_real).collect()
+                else {
+                    return Some(Shape::Failed(
+                        "square() size vector must contain only numbers".into(),
+                    ));
+                };
                 let w = nums.first().cloned().unwrap_or_else(Real::one);
                 let h = nums.get(1).cloned().unwrap_or_else(|| w.clone());
-                Profile::rectangle(w, h)
+                curve::rectangle(w, h)
             }
             _ => return None,
         };
 
-        let sketch = if center { sketch.center() } else { sketch };
-        Some(Shape::Sketch2D(sketch))
+        let shape = Shape::CurveRegion2D(region);
+        Some(if center { shape.center() } else { shape })
     }
 
     #[allow(clippy::unused_self)]
     #[must_use]
     pub fn eval_polygon(&self, args: &[(Option<String>, Value)]) -> Option<Shape> {
         let points_val = Self::get_arg(args, "points", 0)?;
-        let points: Vec<[Real; 2]> = points_val
+        let Some(points) = points_val
             .as_list()?
             .iter()
-            .filter_map(|v| {
-                let nums = v.to_real_list()?;
-                if nums.len() >= 2 {
-                    Some([nums[0].clone(), nums[1].clone()])
-                } else {
-                    None
-                }
+            .map(|value| {
+                let numbers = value.to_real_list()?;
+                (numbers.len() >= 2).then(|| [numbers[0].clone(), numbers[1].clone()])
             })
-            .collect();
+            .collect::<Option<Vec<[Real; 2]>>>()
+        else {
+            return Some(Shape::Failed(
+                "polygon() points must be numeric 2D vectors".into(),
+            ));
+        };
 
         if points.len() < 3 {
             return None;
         }
-        Some(Shape::Sketch2D(Profile::polygon(&points)))
+        Some(Shape::CurveRegion2D(curve::polygon(&points)))
     }
 
     #[must_use]
@@ -267,8 +265,16 @@ impl Evaluator {
             _ => "ltr".to_string(),
         };
 
-        let sketch =
-            render_text_with_direction(&text_str, &font_data, &size, &spacing_val, &direction);
+        let region = match render_text_with_direction(
+            &text_str,
+            &font_data,
+            &size,
+            &spacing_val,
+            &direction,
+        ) {
+            Ok(region) => region,
+            Err(error) => return Some(Shape::Failed(error)),
+        };
 
         let halign = match Self::get_arg(args, "halign", 3) {
             Some(Value::String(s)) => s.clone(),
@@ -279,8 +285,11 @@ impl Evaluator {
             _ => "baseline".to_string(),
         };
 
-        let sketch = apply_text_alignment(sketch, &halign, &valign);
+        let region = match apply_text_alignment(region, &halign, &valign) {
+            Ok(region) => region,
+            Err(error) => return Some(Shape::Failed(error)),
+        };
 
-        Some(Shape::Sketch2D(sketch))
+        Some(Shape::CurveRegion2D(region))
     }
 }

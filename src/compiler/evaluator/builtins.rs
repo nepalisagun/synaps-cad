@@ -1,7 +1,9 @@
-use super::value::reals_equal;
+use super::value::{compare_reals, reals_equal};
 use super::{Evaluator, UserFunction, Value};
 use csgrs::Real;
+use hyperlimit::Sign;
 use openscad_rs::ast::{BinaryOp, Expr, ExprKind, UnaryOp};
+use std::cmp::Ordering;
 
 impl Evaluator {
     pub fn eval_expr(&mut self, expr: &Expr) -> Value {
@@ -36,22 +38,33 @@ impl Evaluator {
                 Value::List(vals)
             }
             ExprKind::Range { start, step, end } => {
-                let from = self.eval_expr(start).as_real().unwrap_or_else(Real::zero);
-                let to = self.eval_expr(end).as_real().unwrap_or_else(Real::zero);
-                let s = step.as_ref().map_or_else(
-                    || {
-                        if to >= from {
-                            Real::one()
-                        } else {
-                            -Real::one()
+                let Some(from) = self.eval_expr(start).as_real() else {
+                    self.warnings.push("range start must be a number".into());
+                    return Value::Undef;
+                };
+                let Some(to) = self.eval_expr(end).as_real() else {
+                    self.warnings.push("range end must be a number".into());
+                    return Value::Undef;
+                };
+                let s = if let Some(step_expr) = step {
+                    let Some(step) = self.eval_expr(step_expr).as_real() else {
+                        self.warnings.push("range step must be a number".into());
+                        return Value::Undef;
+                    };
+                    step
+                } else {
+                    match compare_reals(&to, &from) {
+                        Some(Ordering::Greater | Ordering::Equal) => Real::one(),
+                        Some(Ordering::Less) => -Real::one(),
+                        None => {
+                            self.warnings.push(
+                                "range direction is undecided after the centralized exactness policy"
+                                    .into(),
+                            );
+                            return Value::Undef;
                         }
-                    },
-                    |step_expr| {
-                        self.eval_expr(step_expr)
-                            .as_real()
-                            .unwrap_or_else(Real::one)
-                    },
-                );
+                    }
+                };
                 Value::Range(from, to, s)
             }
             ExprKind::UnaryOp { op, operand } => {
@@ -61,7 +74,9 @@ impl Evaluator {
                         Value::Number(n) => Value::Number(-n),
                         _ => Value::Undef,
                     },
-                    UnaryOp::Not => Value::Bool(!inner.as_bool()),
+                    UnaryOp::Not => self
+                        .decide_truthiness(&inner, "unary ! operand")
+                        .map_or(Value::Undef, |value| Value::Bool(!value)),
                     UnaryOp::Plus => inner,
                     UnaryOp::BinaryNot => Value::Undef,
                 }
@@ -73,10 +88,10 @@ impl Evaluator {
                 else_expr,
             } => {
                 let cond = self.eval_expr(condition);
-                if cond.as_bool() {
-                    self.eval_expr(then_expr)
-                } else {
-                    self.eval_expr(else_expr)
+                match self.decide_truthiness(&cond, "ternary condition") {
+                    Some(true) => self.eval_expr(then_expr),
+                    Some(false) => self.eval_expr(else_expr),
+                    None => Value::Undef,
                 }
             }
             ExprKind::FunctionCall { callee, args } => {
@@ -150,12 +165,12 @@ impl Evaluator {
                 else_expr,
             } => {
                 let cond = self.eval_expr(condition);
-                if cond.as_bool() {
-                    self.eval_expr(then_expr)
-                } else if let Some(ee) = else_expr {
-                    self.eval_expr(ee)
-                } else {
-                    Value::Undef
+                match self.decide_truthiness(&cond, "list-comprehension if condition") {
+                    Some(true) => self.eval_expr(then_expr),
+                    Some(false) => else_expr
+                        .as_ref()
+                        .map_or(Value::Undef, |expression| self.eval_expr(expression)),
+                    None => Value::Undef,
                 }
             }
             ExprKind::LcEach { body } => self.eval_expr(body),
@@ -172,7 +187,11 @@ impl Evaluator {
                     .iter()
                     .map(|argument| (argument.name.clone(), self.eval_expr(&argument.value)))
                     .collect::<Vec<_>>();
-                if values.first().is_some_and(|(_, value)| value.as_bool()) {
+                if values
+                    .first()
+                    .and_then(|(_, value)| self.decide_truthiness(value, "assert() condition"))
+                    == Some(true)
+                {
                     body.as_ref()
                         .map_or(Value::Undef, |body| self.eval_expr(body))
                 } else {
@@ -204,7 +223,15 @@ impl Evaluator {
             return;
         }
         let (name, range_val) = &loop_vars[depth];
-        let items = range_val.to_iterable();
+        let items = match range_val.to_iterable() {
+            Ok(items) => items,
+            Err(error) => {
+                self.warnings.push(format!(
+                    "list-comprehension iterable could not be decided: {error}"
+                ));
+                Vec::new()
+            }
+        };
         let saved = self.variables.get(name).cloned();
         for item in items {
             self.variables.insert(name.clone(), item);
@@ -259,18 +286,34 @@ impl Evaluator {
                     .rem_euclid_certified(&b)
                     .map_or(Value::Undef, Value::Number),
                 BinaryOp::Exponent => a.pow(b).map_or(Value::Undef, Value::Number),
-                BinaryOp::Less => Value::Bool(a < b),
-                BinaryOp::Greater => Value::Bool(a > b),
-                BinaryOp::LessEqual => Value::Bool(a <= b),
-                BinaryOp::GreaterEqual => Value::Bool(a >= b),
-                BinaryOp::Equal => Value::Bool(reals_equal(&a, &b)),
-                BinaryOp::NotEqual => Value::Bool(!reals_equal(&a, &b)),
-                BinaryOp::LogicalAnd => {
-                    Value::Bool(!reals_equal(&a, &Real::zero()) && !reals_equal(&b, &Real::zero()))
+                BinaryOp::Less => compare_reals(&a, &b)
+                    .map_or(Value::Undef, |order| Value::Bool(order == Ordering::Less)),
+                BinaryOp::Greater => compare_reals(&a, &b).map_or(Value::Undef, |order| {
+                    Value::Bool(order == Ordering::Greater)
+                }),
+                BinaryOp::LessEqual => compare_reals(&a, &b).map_or(Value::Undef, |order| {
+                    Value::Bool(order != Ordering::Greater)
+                }),
+                BinaryOp::GreaterEqual => compare_reals(&a, &b)
+                    .map_or(Value::Undef, |order| Value::Bool(order != Ordering::Less)),
+                BinaryOp::Equal => reals_equal(&a, &b).map_or(Value::Undef, Value::Bool),
+                BinaryOp::NotEqual => {
+                    reals_equal(&a, &b).map_or(Value::Undef, |equal| Value::Bool(!equal))
                 }
-                BinaryOp::LogicalOr => {
-                    Value::Bool(!reals_equal(&a, &Real::zero()) || !reals_equal(&b, &Real::zero()))
-                }
+                BinaryOp::LogicalAnd => match (
+                    Value::Number(a).try_as_bool(),
+                    Value::Number(b).try_as_bool(),
+                ) {
+                    (Some(left), Some(right)) => Value::Bool(left && right),
+                    _ => Value::Undef,
+                },
+                BinaryOp::LogicalOr => match (
+                    Value::Number(a).try_as_bool(),
+                    Value::Number(b).try_as_bool(),
+                ) {
+                    (Some(left), Some(right)) => Value::Bool(left || right),
+                    _ => Value::Undef,
+                },
                 _ => Value::Undef,
             },
             (Value::Bool(a), Value::Bool(b)) => match op {
@@ -321,16 +364,18 @@ impl Evaluator {
             (Value::List(a), Value::List(b))
                 if matches!(op, BinaryOp::Add | BinaryOp::Subtract) =>
             {
-                let len = a.len().max(b.len());
-                let result: Vec<Value> = (0..len)
-                    .map(|i| {
-                        let va = a.get(i).and_then(Value::as_real).unwrap_or_else(Real::zero);
-                        let vb = b.get(i).and_then(Value::as_real).unwrap_or_else(Real::zero);
-                        Value::Number(if matches!(op, BinaryOp::Add) {
-                            va + vb
-                        } else {
-                            va - vb
-                        })
+                let result = a
+                    .iter()
+                    .zip(&b)
+                    .map(|(left, right)| match (left.as_real(), right.as_real()) {
+                        (Some(left), Some(right)) => {
+                            Value::Number(if matches!(op, BinaryOp::Add) {
+                                left + right
+                            } else {
+                                left - right
+                            })
+                        }
+                        _ => Value::Undef,
                     })
                     .collect();
                 Value::List(result)
@@ -449,13 +494,14 @@ impl Evaluator {
                 .first()
                 .and_then(Value::as_real)
                 .map_or(Value::Undef, |n| {
-                    Value::Number(if n > Real::zero() {
-                        Real::one()
-                    } else if n < Real::zero() {
-                        -Real::one()
-                    } else {
-                        Real::zero()
-                    })
+                    match hyperlimit::classify_real_sign(&n, crate::compiler::PREDICATE_POLICY)
+                        .value()
+                    {
+                        Some(Sign::Positive) => Value::Number(Real::one()),
+                        Some(Sign::Negative) => Value::Number(-Real::one()),
+                        Some(Sign::Zero) => Value::Number(Real::zero()),
+                        None => Value::Undef,
+                    }
                 }),
             "pow" => {
                 match (
@@ -488,16 +534,8 @@ impl Evaluator {
                 }),
 
             // Extrema.
-            "min" => args
-                .iter()
-                .filter_map(Value::as_real)
-                .reduce(|a, b| if a <= b { a } else { b })
-                .map_or(Value::Undef, Value::Number),
-            "max" => args
-                .iter()
-                .filter_map(Value::as_real)
-                .reduce(|a, b| if a >= b { a } else { b })
-                .map_or(Value::Undef, Value::Number),
+            "min" => exact_extreme(args, false),
+            "max" => exact_extreme(args, true),
 
             // List and string operations.
             "len" => match args.first() {
@@ -519,9 +557,12 @@ impl Evaluator {
             // Vector operations.
             "norm" => {
                 if let Some(Value::List(l)) = args.first() {
-                    let sum_sq = l
-                        .iter()
-                        .filter_map(Value::as_real)
+                    let Some(numbers): Option<Vec<Real>> = l.iter().map(Value::as_real).collect()
+                    else {
+                        return Value::Undef;
+                    };
+                    let sum_sq = numbers
+                        .into_iter()
                         .fold(Real::zero(), |sum, n| sum + &n * &n);
                     real_result!(sum_sq.sqrt())
                 } else {
@@ -618,9 +659,9 @@ impl Evaluator {
                 if args.len() >= 2 {
                     if let (Some(key), Some(Value::List(table))) = (args[0].as_real(), args.get(1))
                     {
-                        let pairs: Vec<(Real, Real)> = table
+                        let Some(mut pairs): Option<Vec<(Real, Real)>> = table
                             .iter()
-                            .filter_map(|row| {
+                            .map(|row| {
                                 let nums = row.to_real_list()?;
                                 if nums.len() >= 2 {
                                     Some((nums[0].clone(), nums[1].clone()))
@@ -628,20 +669,49 @@ impl Evaluator {
                                     None
                                 }
                             })
-                            .collect();
+                            .collect()
+                        else {
+                            return Value::Undef;
+                        };
                         if pairs.is_empty() {
                             return Value::Undef;
                         }
-                        if key <= pairs[0].0 {
+                        for index in 1..pairs.len() {
+                            let mut position = index;
+                            while position > 0 {
+                                let Some(ordering) =
+                                    compare_reals(&pairs[position - 1].0, &pairs[position].0)
+                                else {
+                                    return Value::Undef;
+                                };
+                                if ordering != Ordering::Greater {
+                                    break;
+                                }
+                                pairs.swap(position - 1, position);
+                                position -= 1;
+                            }
+                        }
+                        let Some(first_order) = compare_reals(&key, &pairs[0].0) else {
+                            return Value::Undef;
+                        };
+                        if first_order != Ordering::Greater {
                             return Value::Number(pairs[0].1.clone());
                         }
-                        if key >= pairs.last().expect("pairs is nonempty").0 {
-                            return Value::Number(
-                                pairs.last().expect("pairs is nonempty").1.clone(),
-                            );
+                        let last = pairs.last().expect("pairs is nonempty");
+                        let Some(last_order) = compare_reals(&key, &last.0) else {
+                            return Value::Undef;
+                        };
+                        if last_order != Ordering::Less {
+                            return Value::Number(last.1.clone());
                         }
                         for w in pairs.windows(2) {
-                            if key >= w[0].0 && key <= w[1].0 {
+                            let Some(lower) = compare_reals(&key, &w[0].0) else {
+                                return Value::Undef;
+                            };
+                            let Some(upper) = compare_reals(&key, &w[1].0) else {
+                                return Value::Undef;
+                            };
+                            if lower != Ordering::Less && upper != Ordering::Greater {
                                 let Ok(t) = (key - &w[0].0) / (&w[1].0 - &w[0].0) else {
                                     return Value::Undef;
                                 };
@@ -673,4 +743,23 @@ fn format_value(value: &Value) -> String {
         Value::Range(from, to, step) => format!("[{from}:{step}:{to}]"),
         Value::Undef => "undef".into(),
     }
+}
+
+fn exact_extreme(args: &[Value], maximum: bool) -> Value {
+    let Some(numbers): Option<Vec<Real>> = args.iter().map(Value::as_real).collect() else {
+        return Value::Undef;
+    };
+    let mut numbers = numbers.into_iter();
+    let Some(mut result) = numbers.next() else {
+        return Value::Undef;
+    };
+    for number in numbers {
+        let Some(ordering) = compare_reals(&result, &number) else {
+            return Value::Undef;
+        };
+        if (maximum && ordering == Ordering::Less) || (!maximum && ordering == Ordering::Greater) {
+            result = number;
+        }
+    }
+    Value::Number(result)
 }

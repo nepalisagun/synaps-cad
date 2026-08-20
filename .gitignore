@@ -1,5 +1,8 @@
 /.claude/
 /target/
+/fuzz/target/
+/fuzz/artifacts/
+/fuzz/corpus/
 /dist/
 /var/
 

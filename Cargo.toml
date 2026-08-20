@@ -23,7 +23,10 @@ reqwest = { version = "0.13", features = ["json"] }
 # corresponding crates.io dependency below.
 csgrs = { path = "../csgrs", features = ["offset"] }
 # csgrs = { version = "0.23.0", features = ["offset"] }
+hyperlimit = { version = "0.4.1", path = "../hyperlimit" }
+hypercurve = { path = "../hypercurve" }
 hyperlattice = { path = "../hyperlattice" }
+hypermesh = { path = "../hypermesh" }
 hyperreal = { path = "../hyperreal", optional = true, features = ["dispatch-trace"] }
 url = "2"
 web-time = "1"
@@ -71,9 +74,6 @@ pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
 too_many_lines = "allow"
 
-[dev-dependencies]
-hypercurve = { path = "../hypercurve" }
-
 # Validate the release candidate before cargo-release creates its version commit.
 [package.metadata.release]
 pre-release-hook = ["cargo", "clippy", "--", "-D", "warnings"]
@@ -84,6 +84,7 @@ harness = false
 
 [features]
 default = []
+fuzz-bounded-campaign = []
 dispatch-trace = [
     "csgrs/dispatch-trace",
     "dep:hyperreal",

@@ -47,6 +47,9 @@ jobs:
       - name: Run tests
         run: .github/scripts/test-ci.sh
 
+      - name: Check fuzz targets
+        run: cargo check --manifest-path fuzz/Cargo.toml --bins --locked
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest

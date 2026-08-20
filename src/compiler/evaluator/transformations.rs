@@ -1,6 +1,7 @@
-use csgrs::Profile;
 use csgrs::Real;
-use csgrs::csg::CSG;
+use csgrs::curve::CurveRegionExt;
+use csgrs::{curve, solid};
+use hypercurve::CurveRegion2;
 use openscad_rs::ast::Statement;
 
 use super::{Evaluator, Value};
@@ -44,10 +45,22 @@ impl Evaluator {
     ) -> Shape {
         match kind {
             TransformKind::Translate => {
-                let v = Self::get_positional_arg(args, 0)
-                    .or_else(|| Self::get_named_arg(args, "v"))
-                    .and_then(Value::to_real_list)
-                    .unwrap_or_default();
+                let value =
+                    Self::get_positional_arg(args, 0).or_else(|| Self::get_named_arg(args, "v"));
+                let v = match value {
+                    Some(Value::List(_)) => match value.and_then(Value::to_real_list) {
+                        Some(values) => values,
+                        None => {
+                            return Shape::Failed(
+                                "translate() vector must contain only numbers".into(),
+                            );
+                        }
+                    },
+                    Some(_) => {
+                        return Shape::Failed("translate() requires a numeric vector".into());
+                    }
+                    None => Vec::new(),
+                };
                 let (x, y, z) = (
                     v.first().cloned().unwrap_or_else(Real::zero),
                     v.get(1).cloned().unwrap_or_else(Real::zero),
@@ -56,7 +69,22 @@ impl Evaluator {
                 shape.translate(x, y, z)
             }
             TransformKind::Rotate => {
-                let axis_vec = Self::get_named_arg(args, "v").and_then(Value::to_real_list);
+                let axis_vec = match Self::get_named_arg(args, "v") {
+                    Some(Value::List(_)) => {
+                        match Self::get_named_arg(args, "v").and_then(Value::to_real_list) {
+                            Some(values) => Some(values),
+                            None => {
+                                return Shape::Failed(
+                                    "rotate() axis vector must contain only numbers".into(),
+                                );
+                            }
+                        }
+                    }
+                    Some(_) => {
+                        return Shape::Failed("rotate() axis must be a numeric vector".into());
+                    }
+                    None => None,
+                };
                 let a_val =
                     Self::get_positional_arg(args, 0).or_else(|| Self::get_named_arg(args, "a"));
 
@@ -70,18 +98,24 @@ impl Evaluator {
                         axis[2].clone(),
                     ]);
                     shape.rotate_axis_angle(&axis, &angle)
-                } else if let Some(v) = a_val.and_then(Value::to_real_list) {
+                } else if matches!(a_val, Some(Value::List(_))) {
+                    let Some(v) = a_val.and_then(Value::to_real_list) else {
+                        return Shape::Failed(
+                            "rotate() angle vector must contain only numbers".into(),
+                        );
+                    };
                     let (x, y, z) = (
                         v.first().cloned().unwrap_or_else(Real::zero),
                         v.get(1).cloned().unwrap_or_else(Real::zero),
                         v.get(2).cloned().unwrap_or_else(Real::zero),
                     );
                     shape.rotate(x, y, z)
-                } else {
-                    let angle = Self::get_positional_arg(args, 0)
-                        .and_then(Value::as_real)
-                        .unwrap_or_else(Real::zero);
+                } else if let Some(angle) = a_val.and_then(Value::as_real) {
                     shape.rotate(Real::zero(), Real::zero(), angle)
+                } else if a_val.is_some() {
+                    Shape::Failed("rotate() angle must be numeric".into())
+                } else {
+                    shape
                 }
             }
             TransformKind::Scale => {
@@ -89,7 +123,11 @@ impl Evaluator {
                     Self::get_positional_arg(args, 0).or_else(|| Self::get_named_arg(args, "v"));
                 match val {
                     Some(Value::List(_)) => {
-                        let v = val.and_then(Value::to_real_list).unwrap_or_default();
+                        let Some(v) = val.and_then(Value::to_real_list) else {
+                            return Shape::Failed(
+                                "scale() vector must contain only numbers".into(),
+                            );
+                        };
                         let (x, y, z) = (
                             v.first().cloned().unwrap_or_else(Real::one),
                             v.get(1).cloned().unwrap_or_else(Real::one),
@@ -105,10 +143,20 @@ impl Evaluator {
                 }
             }
             TransformKind::Mirror => {
-                let v = Self::get_positional_arg(args, 0)
-                    .or_else(|| Self::get_named_arg(args, "v"))
-                    .and_then(Value::to_real_list)
-                    .unwrap_or_else(|| vec![Real::one(), Real::zero(), Real::zero()]);
+                let value =
+                    Self::get_positional_arg(args, 0).or_else(|| Self::get_named_arg(args, "v"));
+                let v = match value {
+                    Some(Value::List(_)) => match value.and_then(Value::to_real_list) {
+                        Some(values) => values,
+                        None => {
+                            return Shape::Failed(
+                                "mirror() vector must contain only numbers".into(),
+                            );
+                        }
+                    },
+                    Some(_) => return Shape::Failed("mirror() requires a numeric vector".into()),
+                    None => vec![Real::one(), Real::zero(), Real::zero()],
+                };
                 let (nx, ny, nz) = (
                     v.first().cloned().unwrap_or_else(Real::one),
                     v.get(1).cloned().unwrap_or_else(Real::zero),
@@ -131,24 +179,33 @@ impl Evaluator {
     ) -> Option<Shape> {
         let height = Self::get_arg_real(args, "height", 0).unwrap_or_else(Real::one);
         let twist = Self::get_arg_real(args, "twist", 99).unwrap_or_else(Real::zero);
-        let scale = Self::get_named_arg(args, "scale").map_or_else(
-            || [Real::one(), Real::one()],
-            |value| match value {
-                Value::Number(_) => {
-                    let scale = value.as_real().unwrap_or_else(Real::one);
-                    [scale.clone(), scale]
-                }
-                Value::List(_) => {
-                    let values = value.to_real_list().unwrap_or_default();
-                    [
-                        values.first().cloned().unwrap_or_else(Real::one),
-                        values.get(1).cloned().unwrap_or_else(Real::one),
-                    ]
-                }
-                _ => [Real::one(), Real::one()],
-            },
-        );
-        let center = Self::get_arg_bool(args, "center", 99, false);
+        let scale = match Self::get_named_arg(args, "scale") {
+            None => [Real::one(), Real::one()],
+            Some(Value::Number(value)) => [value.clone(), value.clone()],
+            Some(Value::List(_)) => {
+                let Some(values) = Self::get_named_arg(args, "scale").and_then(Value::to_real_list)
+                else {
+                    return Some(Shape::Failed(
+                        "linear_extrude() scale vector must contain only numbers".into(),
+                    ));
+                };
+                [
+                    values.first().cloned().unwrap_or_else(Real::one),
+                    values.get(1).cloned().unwrap_or_else(Real::one),
+                ]
+            }
+            Some(_) => {
+                return Some(Shape::Failed(
+                    "linear_extrude() scale must be a number or numeric vector".into(),
+                ));
+            }
+        };
+        let center = match Self::get_arg_bool(args, "center", 99, false) {
+            Ok(value) => value,
+            Err(error) => {
+                return Some(Shape::Failed(format!("linear_extrude() failed: {error}")));
+            }
+        };
         let slices = Self::get_arg_real(args, "slices", 99)
             .and_then(|value| value.round_certified().ok())
             .and_then(|integer| usize::try_from(integer).ok())
@@ -160,23 +217,40 @@ impl Evaluator {
             return None;
         }
 
-        let sketch = self.shapes_to_sketch(&child_shapes)?;
+        let region = match self.shapes_to_curve_region(&child_shapes) {
+            Ok(Some(region)) => region,
+            Ok(None) => return None,
+            Err(error) => return Some(Shape::Failed(error)),
+        };
 
-        let mesh = if twist != Real::zero() || scale != [Real::one(), Real::one()] {
-            match sketch.extrude_twisted(height, twist, scale, slices.max(1), ()) {
-                Ok(mesh) => mesh,
+        let is_plain_extrusion = super::value::reals_equal(&twist, &Real::zero()) == Some(true)
+            && super::value::reals_equal(&scale[0], &Real::one()) == Some(true)
+            && super::value::reals_equal(&scale[1], &Real::one()) == Some(true);
+        let mesh = if is_plain_extrusion {
+            match curve::try_extrude(&region, height, &csgrs::GeometryContext::STRICT) {
+                Ok(outcome) => outcome.into_value(),
                 Err(error) => {
-                    self.warnings
-                        .push(format!("linear_extrude() error: {error:?}"));
-                    return None;
+                    return Some(Shape::Failed(format!("linear_extrude() failed: {error:?}")));
                 }
             }
         } else {
-            sketch.extrude(height, ())
+            match curve::extrude_twisted(
+                &region,
+                height,
+                twist,
+                scale,
+                slices.max(1),
+                &csgrs::GeometryContext::STRICT,
+            ) {
+                Ok(outcome) => outcome.into_value(),
+                Err(error) => {
+                    return Some(Shape::Failed(format!("linear_extrude() failed: {error:?}")));
+                }
+            }
         };
 
-        let mesh = if center { mesh.center() } else { mesh };
-        Some(Shape::from_csg_mesh(mesh))
+        let mesh = if center { solid::center(&mesh) } else { mesh };
+        Some(Shape::from_triangle_mesh(mesh))
     }
 
     pub fn eval_rotate_extrude(
@@ -192,35 +266,58 @@ impl Evaluator {
             return None;
         }
 
-        let sketch = self.shapes_to_sketch(&child_shapes)?;
-        let mesh = match sketch.revolve(angle, slices, ()) {
-            Ok(m) => m,
+        let region = match self.shapes_to_curve_region(&child_shapes) {
+            Ok(Some(region)) => region,
+            Ok(None) => return None,
+            Err(error) => return Some(Shape::Failed(error)),
+        };
+        let mesh = match curve::revolve(&region, angle, slices, &csgrs::GeometryContext::STRICT) {
+            Ok(outcome) => outcome.into_value(),
             Err(e) => {
-                self.warnings.push(format!("rotate_extrude() error: {e:?}"));
-                return None;
+                return Some(Shape::Failed(format!("rotate_extrude() failed: {e:?}")));
             }
         };
-        Some(Shape::from_csg_mesh(mesh))
+        Some(Shape::from_triangle_mesh(mesh))
     }
 
-    /// Convert shapes to a single Sketch. 3D meshes are dropped with a warning.
-    pub fn shapes_to_sketch(&mut self, shapes: &[Shape]) -> Option<Profile> {
-        let mut result: Option<Profile> = None;
+    /// Converts shapes to one filled curve region. 3D meshes are skipped with
+    /// the same warning behavior as `OpenSCAD` extrusion.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a child already failed or when exact union of the
+    /// child regions cannot be certified.
+    pub fn shapes_to_curve_region(
+        &mut self,
+        shapes: &[Shape],
+    ) -> Result<Option<CurveRegion2>, String> {
+        let mut result: Option<CurveRegion2> = None;
         for shape in shapes {
             match shape {
-                Shape::Sketch2D(s) => {
-                    result = Some(result.map_or_else(|| s.clone(), |r| r.union(s)));
+                Shape::CurveRegion2D(region) => {
+                    result = match result {
+                        Some(current) => {
+                            match current.try_union(region, &hypercurve::CurvePolicy::STRICT) {
+                                Ok(union) => Some(union.into_value()),
+                                Err(error) => {
+                                    return Err(format!(
+                                        "exact 2D union inside extrusion failed: {error}"
+                                    ));
+                                }
+                            }
+                        }
+                        None => Some(region.clone()),
+                    };
                 }
-                Shape::Mesh3D(_) => {
+                Shape::TriangleMesh3D(_) => {
                     self.warnings
                         .push("3D mesh child inside extrude, skipping".into());
                 }
                 Shape::Failed(e) => {
-                    self.warnings
-                        .push(format!("Failed child inside extrude: {e}"));
+                    return Err(format!("failed child inside extrusion: {e}"));
                 }
             }
         }
-        result
+        Ok(result)
     }
 }

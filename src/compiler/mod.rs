@@ -2,11 +2,6 @@ use csgrs::Real;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-fn sketch_preview_thickness() -> Real {
-    (Real::one() / Real::from(100_u8))
-        .expect("the exact sketch preview thickness denominator is nonzero")
-}
-
 pub mod evaluator;
 pub mod geometry;
 pub mod rendering;
@@ -15,6 +10,12 @@ pub mod types;
 pub use evaluator::Evaluator;
 pub use rendering::render_orthographic_views;
 pub use types::{CompilationResult, MeshData, ViewImage};
+
+/// SynapsCAD requires strictly certified topology throughout one compilation.
+pub(crate) const PREDICATE_POLICY: hyperlimit::PredicatePolicy =
+    hyperlimit::PredicatePolicy::STRICT;
+pub(crate) const MESH_CONTEXT: hypermesh::MeshContext =
+    hypermesh::MeshContext::new(PREDICATE_POLICY);
 
 /// `OpenSCAD` scene loaded by a fresh `SynapsCAD` workspace.
 pub const DEFAULT_SCAD_CODE: &str = r#"// Welcome to SynapsCAD!
@@ -121,8 +122,8 @@ pub fn compile_scad_code(
             return CompilationResult::Canceled;
         }
         let mut mesh_data = match shape {
-            geometry::Shape::Mesh3D(mesh) => {
-                match geometry::conversions::csg_mesh_to_mesh_data(&mesh) {
+            geometry::Shape::TriangleMesh3D(mesh) => {
+                match geometry::conversions::triangle_mesh_to_mesh_data(&mesh) {
                     Ok(m) => m,
                     Err(error) => {
                         evaluator
@@ -132,11 +133,21 @@ pub fn compile_scad_code(
                     }
                 }
             }
-            geometry::Shape::Sketch2D(sketch) => {
-                // Preview bare 2D shapes as thin solids.
-                match geometry::conversions::csg_mesh_to_mesh_data(
-                    &sketch.extrude(sketch_preview_thickness(), ()),
-                ) {
+            geometry::Shape::CurveRegion2D(region) => {
+                // Match OpenSCAD's top-level 2D presentation with a flat
+                // triangulated surface. Rendering must not invent thickness
+                // or turn the curve region into a modeled 3D solid.
+                let triangulated =
+                    match csgrs::curve::try_triangulate(&region, &csgrs::GeometryContext::STRICT) {
+                        Ok(outcome) => outcome.into_value(),
+                        Err(error) => {
+                            evaluator
+                                .warnings
+                                .push(format!("2D preview triangulation failed: {error}"));
+                            continue;
+                        }
+                    };
+                match geometry::conversions::triangle_mesh_to_mesh_data(&triangulated) {
                     Ok(m) => m,
                     Err(error) => {
                         evaluator

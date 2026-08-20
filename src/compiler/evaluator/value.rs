@@ -1,9 +1,14 @@
 use csgrs::Real;
+use std::cmp::Ordering;
 
-pub(crate) fn reals_equal(left: &Real, right: &Real) -> bool {
-    left.certified_eq_until(right, Real::PARTIAL_CMP_MIN_PRECISION)
-        .as_bool()
-        .unwrap_or(false)
+/// Compares two exact reals through Hyperlimit's workspace-wide predicate
+/// cascade, including its policy-authorized terminal evaluation.
+pub(crate) fn compare_reals(left: &Real, right: &Real) -> Option<Ordering> {
+    hyperlimit::compare_reals(left, right, crate::compiler::PREDICATE_POLICY).value()
+}
+
+pub(crate) fn reals_equal(left: &Real, right: &Real) -> Option<bool> {
+    compare_reals(left, right).map(|ordering| ordering == Ordering::Equal)
 }
 
 /// Runtime value produced by the `OpenSCAD` expression evaluator.
@@ -63,16 +68,17 @@ impl Value {
         u32::try_from(integer).ok()
     }
 
-    /// Applies `OpenSCAD` truthiness rules.
+    /// Applies `OpenSCAD` truthiness rules when the numeric zero predicate can
+    /// be decided under the centralized certainty policy.
     #[must_use]
-    pub fn as_bool(&self) -> bool {
+    pub fn try_as_bool(&self) -> Option<bool> {
         match self {
-            Self::Bool(b) => *b,
-            Self::Number(n) => !reals_equal(n, &Real::zero()),
-            Self::String(s) => !s.is_empty(),
-            Self::List(l) => !l.is_empty(),
-            Self::Undef => false,
-            Self::Range(..) => true,
+            Self::Bool(b) => Some(*b),
+            Self::Number(n) => reals_equal(n, &Real::zero()).map(|is_zero| !is_zero),
+            Self::String(s) => Some(!s.is_empty()),
+            Self::List(l) => Some(!l.is_empty()),
+            Self::Undef => Some(false),
+            Self::Range(..) => Some(true),
         }
     }
 
@@ -85,35 +91,90 @@ impl Value {
         }
     }
 
-    /// Converts the list elements that are numeric to exact values.
+    /// Converts a wholly numeric list to exact values.
+    ///
+    /// A malformed element invalidates the vector rather than being discarded
+    /// and shifting every later coordinate to a different position.
     #[must_use]
     pub fn to_real_list(&self) -> Option<Vec<Real>> {
         self.as_list()
-            .map(|l| l.iter().filter_map(Self::as_real).collect())
+            .and_then(|l| l.iter().map(Self::as_real).collect())
     }
 
     /// Expands ranges and lists into values suitable for `for` iteration.
-    #[must_use]
-    pub fn to_iterable(&self) -> Vec<Self> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if an exact range direction or bound predicate remains
+    /// undecided after the centralized certainty cascade.
+    pub fn to_iterable(&self) -> Result<Vec<Self>, String> {
         match self {
             Self::Range(from, to, step) => {
                 let mut vals = Vec::new();
                 let mut value = from.clone();
-                if step > &Real::zero() {
-                    while value <= *to {
+                let step_order = compare_reals(step, &Real::zero())
+                    .ok_or_else(|| "range step sign is undecided".to_owned())?;
+                if step_order == Ordering::Greater {
+                    loop {
+                        let bound = compare_reals(&value, to)
+                            .ok_or_else(|| "ascending range bound is undecided".to_owned())?;
+                        if bound == Ordering::Greater {
+                            break;
+                        }
                         vals.push(Self::Number(value.clone()));
+                        #[cfg(feature = "fuzz-bounded-campaign")]
+                        if vals.len() >= 256 {
+                            break;
+                        }
                         value += step;
                     }
-                } else if step < &Real::zero() {
-                    while value >= *to {
+                } else if step_order == Ordering::Less {
+                    loop {
+                        let bound = compare_reals(&value, to)
+                            .ok_or_else(|| "descending range bound is undecided".to_owned())?;
+                        if bound == Ordering::Less {
+                            break;
+                        }
                         vals.push(Self::Number(value.clone()));
+                        #[cfg(feature = "fuzz-bounded-campaign")]
+                        if vals.len() >= 256 {
+                            break;
+                        }
                         value += step;
                     }
                 }
-                vals
+                Ok(vals)
             }
-            Self::List(l) => l.clone(),
-            _ => vec![self.clone()],
+            Self::List(l) => Ok(l.clone()),
+            _ => Ok(vec![self.clone()]),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn numeric_comparisons_use_the_centralized_predicate_policy() {
+        let below_pi = Real::from(103_993_u32) / Real::from(33_102_u32);
+        let below_pi = below_pi.expect("the denominator is nonzero");
+
+        assert_eq!(
+            compare_reals(&Real::pi(), &below_pi),
+            Some(Ordering::Greater)
+        );
+        assert_eq!(reals_equal(&Real::pi(), &below_pi), Some(false));
+    }
+
+    #[test]
+    fn malformed_numeric_lists_are_not_compacted() {
+        let list = Value::List(vec![
+            Value::Number(Real::one()),
+            Value::String("not a coordinate".into()),
+            Value::Number(Real::from(3_u8)),
+        ]);
+
+        assert!(list.to_real_list().is_none());
     }
 }

@@ -34,18 +34,14 @@ fn time_phases(code: &str, fn_override: u32) -> PhaseTimes {
     let parts = shapes
         .into_iter()
         .filter_map(|(shape, _)| match shape {
-            Shape::Mesh3D(mesh) => {
-                synaps_cad::compiler::geometry::conversions::csg_mesh_to_mesh_data(&mesh).ok()
+            Shape::TriangleMesh3D(mesh) => {
+                synaps_cad::compiler::geometry::conversions::triangle_mesh_to_mesh_data(&mesh).ok()
             }
-            Shape::Sketch2D(sketch) => {
-                synaps_cad::compiler::geometry::conversions::csg_mesh_to_mesh_data(
-                    &sketch.extrude(
-                        (Real::one() / Real::from(100_u8))
-                            .expect("nonzero benchmark thickness denominator"),
-                        (),
-                    ),
-                )
-                .ok()
+            Shape::CurveRegion2D(region) => {
+                let mesh = csgrs::curve::try_triangulate(&region, &csgrs::GeometryContext::STRICT)
+                    .ok()?
+                    .into_value();
+                synaps_cad::compiler::geometry::conversions::triangle_mesh_to_mesh_data(&mesh).ok()
             }
             Shape::Failed(_) => None,
         })
