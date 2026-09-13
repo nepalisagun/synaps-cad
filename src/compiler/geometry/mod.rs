@@ -3,7 +3,7 @@ use std::fmt;
 use csgrs::curve::CurveRegionExt;
 use csgrs::solid::{self, SolidExt};
 use csgrs::{Real, TriangleMesh};
-use hypercurve::{CurvePolicy, CurveRegion2};
+use hypercurve::{CurveContext, CurveRegion2};
 use hyperlattice::{Matrix4, Point3, Vector3};
 use hypermesh::Plane;
 
@@ -107,7 +107,7 @@ impl Shape {
         }
         match (self, other) {
             (Self::CurveRegion2D(a), Self::CurveRegion2D(b)) => {
-                match a.try_union(&b, &hypercurve::CurvePolicy::STRICT) {
+                match a.try_union(&b, &hypercurve::CurveContext::STRICT) {
                     Ok(region) => Self::CurveRegion2D(region.into_value()),
                     Err(error) => Self::Failed(format!("exact 2D union failed: {error}")),
                 }
@@ -129,7 +129,7 @@ impl Shape {
         }
         match (self, other) {
             (Self::CurveRegion2D(a), Self::CurveRegion2D(b)) => {
-                match a.try_difference(&b, &hypercurve::CurvePolicy::STRICT) {
+                match a.try_difference(&b, &hypercurve::CurveContext::STRICT) {
                     Ok(region) => Self::CurveRegion2D(region.into_value()),
                     Err(error) => Self::Failed(format!("exact 2D difference failed: {error}")),
                 }
@@ -151,7 +151,7 @@ impl Shape {
         }
         match (self, other) {
             (Self::CurveRegion2D(a), Self::CurveRegion2D(b)) => {
-                match a.try_intersection(&b, &hypercurve::CurvePolicy::STRICT) {
+                match a.try_intersection(&b, &hypercurve::CurveContext::STRICT) {
                     Ok(region) => Self::CurveRegion2D(region.into_value()),
                     Err(error) => Self::Failed(format!("exact 2D intersection failed: {error}")),
                 }
@@ -301,7 +301,7 @@ fn transform_curve_region(region: &CurveRegion2, matrix: &Matrix4, operation: &s
         &matrix.0[1][1],
         &matrix.0[0][3],
         &matrix.0[1][3],
-        &CurvePolicy::STRICT,
+        &CurveContext::STRICT,
     ) {
         Ok(region) => Shape::CurveRegion2D(region.into_value()),
         Err(error) => Shape::Failed(format!(
@@ -345,8 +345,11 @@ mod tests {
             Curve2::from(LineSeg2::try_new(point(2, 4), point(-2, 4)).unwrap()),
         ])
         .unwrap();
-        let curved =
-            Shape::CurveRegion2D(CurveRegion2::try_from_boundary_paths(&[boundary]).unwrap());
+        let curved = Shape::CurveRegion2D(
+            CurveRegion2::try_from_boundary_paths(&[boundary], &CurveContext::STRICT)
+                .unwrap()
+                .into_value(),
+        );
         let cutter = Shape::CurveRegion2D(csgrs::curve::translated(
             &csgrs::curve::rectangle(Real::from(6), Real::from(3)),
             Real::from(-3),

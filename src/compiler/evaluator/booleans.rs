@@ -1,7 +1,8 @@
 use csgrs::Real;
 use csgrs::solid;
 use hypercurve::{
-    BezierSplitFragment2, BezierSubcurve2, CurveOutcome, CurvePolicy, CurveRegion2, Point2,
+    BezierSplitFragment2, BezierSubcurve2, CurveContext, CurveOutcome, CurveRegion2,
+    OffsetCornerStyle2, Point2,
 };
 use openscad_rs::ast::Statement;
 use std::cmp::Ordering;
@@ -124,7 +125,12 @@ impl Evaluator {
             } else {
                 Some(offset_result(
                     "offset(r=...)",
-                    csgrs::curve::offset_rounded(&region, r_val, &CurvePolicy::STRICT),
+                    csgrs::curve::offset(
+                        &region,
+                        r_val,
+                        &OffsetCornerStyle2::Round,
+                        &CurveContext::STRICT,
+                    ),
                 ))
             }
         } else if let Some(d_val) = delta {
@@ -133,7 +139,14 @@ impl Evaluator {
             } else {
                 Some(offset_result(
                     "offset(delta=...)",
-                    csgrs::curve::offset(&region, d_val, &CurvePolicy::STRICT),
+                    csgrs::curve::offset(
+                        &region,
+                        d_val,
+                        &OffsetCornerStyle2::Miter {
+                            limit: Real::from(4),
+                        },
+                        &CurveContext::STRICT,
+                    ),
                 ))
             }
         } else {
@@ -143,7 +156,12 @@ impl Evaluator {
             } else {
                 Some(offset_result(
                     "offset(...)",
-                    csgrs::curve::offset_rounded(&region, d, &CurvePolicy::STRICT),
+                    csgrs::curve::offset(
+                        &region,
+                        d,
+                        &OffsetCornerStyle2::Round,
+                        &CurveContext::STRICT,
+                    ),
                 ))
             }
         }

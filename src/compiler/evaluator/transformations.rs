@@ -297,7 +297,7 @@ impl Evaluator {
                 Shape::CurveRegion2D(region) => {
                     result = match result {
                         Some(current) => {
-                            match current.try_union(region, &hypercurve::CurvePolicy::STRICT) {
+                            match current.try_union(region, &hypercurve::CurveContext::STRICT) {
                                 Ok(union) => Some(union.into_value()),
                                 Err(error) => {
                                     return Err(format!(

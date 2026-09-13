@@ -20,7 +20,9 @@ fn planar_shape(cursor: &mut support::ByteCursor<'_>) -> hypercurve::CurveRegion
         4 => curve::heart(a, b, segments),
         5 => curve::egg(a, b, segments),
         6 => curve::teardrop(a.clone(), a + b, segments),
-        7 => curve::ring(a, b, segments),
+        7 => curve::ring(a, b, segments, &csgrs::GeometryContext::STRICT)
+            .map(csgrs::GeometryOutcome::into_value)
+            .unwrap_or_else(|_| curve::empty()),
         8 => curve::involute_gear(
             a,
             teeth,

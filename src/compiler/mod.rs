@@ -11,7 +11,7 @@ pub use evaluator::Evaluator;
 pub use rendering::render_orthographic_views;
 pub use types::{CompilationResult, MeshData, ViewImage};
 
-/// SynapsCAD requires strictly certified topology throughout one compilation.
+/// `SynapsCAD` requires strictly certified topology throughout one compilation.
 pub(crate) const PREDICATE_POLICY: hyperlimit::PredicatePolicy =
     hyperlimit::PredicatePolicy::STRICT;
 pub(crate) const MESH_CONTEXT: hypermesh::MeshContext =

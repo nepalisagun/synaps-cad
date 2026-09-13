@@ -277,7 +277,7 @@ pub fn render_text_with_direction(
 
             combined = Some(match combined {
                 Some(acc) => acc
-                    .try_union(&positioned, &hypercurve::CurvePolicy::STRICT)
+                    .try_union(&positioned, &hypercurve::CurveContext::STRICT)
                     .map(hypercurve::CurveOutcome::into_value)
                     .map_err(|error| format!("exact text glyph union failed: {error}"))?,
                 None => positioned,
