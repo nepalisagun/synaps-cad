@@ -102,8 +102,7 @@ mod tests {
         let rendered = triangle_mesh_to_mesh_data(&mesh).unwrap();
 
         assert_eq!(rendered.positions.len(), 9);
-        for triangle in rendered.positions.chunks_exact(3) {
-            let [a, b, c] = triangle else { unreachable!() };
+        for [a, b, c] in rendered.positions.as_chunks::<3>().0 {
             let area = (b[2] - a[2]).mul_add(-(c[0] - a[0]), (b[0] - a[0]) * (c[2] - a[2]));
             assert!(area.abs() > f32::EPSILON);
         }

@@ -1691,7 +1691,9 @@ fn test_cone_zero_r1() {
 
 fn signed_volume(mesh: &MeshData) -> f64 {
     mesh.indices
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|triangle| {
             let a = mesh.positions[triangle[0] as usize].map(f64::from);
             let b = mesh.positions[triangle[1] as usize].map(f64::from);
