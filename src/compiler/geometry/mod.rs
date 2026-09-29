@@ -346,9 +346,13 @@ mod tests {
         ])
         .unwrap();
         let curved = Shape::CurveRegion2D(
-            CurveRegion2::try_from_boundary_paths(&[boundary], &CurveContext::STRICT)
-                .unwrap()
-                .into_value(),
+            CurveRegion2::try_from_boundary_paths(
+                &[boundary],
+                hypercurve::FillRule::NonZero,
+                &CurveContext::STRICT,
+            )
+            .unwrap()
+            .into_value(),
         );
         let cutter = Shape::CurveRegion2D(csgrs::curve::translated(
             &csgrs::curve::rectangle(Real::from(6), Real::from(3)),
