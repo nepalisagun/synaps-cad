@@ -1,5 +1,5 @@
 use csgrs::Real;
-use csgrs::curve::{self, CurveRegionExt};
+use csgrs::curve;
 use hypercurve::CurveRegion2;
 
 /// Bundled Liberation Sans Regular font data.
@@ -277,7 +277,11 @@ pub fn render_text_with_direction(
 
             combined = Some(match combined {
                 Some(acc) => acc
-                    .try_union(&positioned, &hypercurve::CurveContext::STRICT)
+                    .boolean_region(
+                        &positioned,
+                        hypercurve::BooleanOp::Union,
+                        &hypercurve::CurveContext::STRICT,
+                    )
                     .map(hypercurve::CurveOutcome::into_value)
                     .map_err(|error| format!("exact text glyph union failed: {error}"))?,
                 None => positioned,

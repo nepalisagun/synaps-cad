@@ -1,5 +1,4 @@
 use csgrs::Real;
-use csgrs::curve::CurveRegionExt;
 use csgrs::{curve, solid};
 use hypercurve::CurveRegion2;
 use openscad_rs::ast::Statement;
@@ -297,7 +296,11 @@ impl Evaluator {
                 Shape::CurveRegion2D(region) => {
                     result = match result {
                         Some(current) => {
-                            match current.try_union(region, &hypercurve::CurveContext::STRICT) {
+                            match current.boolean_region(
+                                region,
+                                hypercurve::BooleanOp::Union,
+                                &hypercurve::CurveContext::STRICT,
+                            ) {
                                 Ok(union) => Some(union.into_value()),
                                 Err(error) => {
                                     return Err(format!(

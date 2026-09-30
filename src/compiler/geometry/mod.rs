@@ -1,6 +1,5 @@
 use std::fmt;
 
-use csgrs::curve::CurveRegionExt;
 use csgrs::solid::{self, SolidExt};
 use csgrs::{Real, TriangleMesh};
 use hypercurve::{CurveContext, CurveRegion2};
@@ -107,7 +106,11 @@ impl Shape {
         }
         match (self, other) {
             (Self::CurveRegion2D(a), Self::CurveRegion2D(b)) => {
-                match a.try_union(&b, &hypercurve::CurveContext::STRICT) {
+                match a.boolean_region(
+                    &b,
+                    hypercurve::BooleanOp::Union,
+                    &hypercurve::CurveContext::STRICT,
+                ) {
                     Ok(region) => Self::CurveRegion2D(region.into_value()),
                     Err(error) => Self::Failed(format!("exact 2D union failed: {error}")),
                 }
@@ -129,7 +132,11 @@ impl Shape {
         }
         match (self, other) {
             (Self::CurveRegion2D(a), Self::CurveRegion2D(b)) => {
-                match a.try_difference(&b, &hypercurve::CurveContext::STRICT) {
+                match a.boolean_region(
+                    &b,
+                    hypercurve::BooleanOp::Difference,
+                    &hypercurve::CurveContext::STRICT,
+                ) {
                     Ok(region) => Self::CurveRegion2D(region.into_value()),
                     Err(error) => Self::Failed(format!("exact 2D difference failed: {error}")),
                 }
@@ -151,7 +158,11 @@ impl Shape {
         }
         match (self, other) {
             (Self::CurveRegion2D(a), Self::CurveRegion2D(b)) => {
-                match a.try_intersection(&b, &hypercurve::CurveContext::STRICT) {
+                match a.boolean_region(
+                    &b,
+                    hypercurve::BooleanOp::Intersection,
+                    &hypercurve::CurveContext::STRICT,
+                ) {
                     Ok(region) => Self::CurveRegion2D(region.into_value()),
                     Err(error) => Self::Failed(format!("exact 2D intersection failed: {error}")),
                 }
