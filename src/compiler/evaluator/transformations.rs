@@ -296,12 +296,8 @@ impl Evaluator {
                 Shape::CurveRegion2D(region) => {
                     result = match result {
                         Some(current) => {
-                            match current.boolean_region(
-                                region,
-                                hypercurve::BooleanOp::Union,
-                                &hypercurve::CurveContext::STRICT,
-                            ) {
-                                Ok(union) => Some(union.into_value()),
+                            match current.boolean_region(region, hypercurve::BooleanOp::Union) {
+                                Ok(union) => Some(union),
                                 Err(error) => {
                                     return Err(format!(
                                         "exact 2D union inside extrusion failed: {error}"

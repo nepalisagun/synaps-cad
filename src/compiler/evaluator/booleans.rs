@@ -1,9 +1,6 @@
 use csgrs::Real;
 use csgrs::solid;
-use hypercurve::{
-    CurveContext, CurveFamily2, CurveGeometry2, CurveOutcome, CurveRegion2, OffsetCornerStyle2,
-    Point2,
-};
+use hypercurve::{CurveFamily2, CurveGeometry2, CurveRegion2, OffsetCornerStyle2, Point2};
 use openscad_rs::ast::Statement;
 use std::cmp::Ordering;
 use std::fmt;
@@ -11,12 +8,9 @@ use std::fmt;
 use super::{Evaluator, Value};
 use crate::compiler::geometry::{BoolOp, Shape};
 
-fn offset_result<E: fmt::Display>(
-    operation: &str,
-    result: Result<CurveOutcome<CurveRegion2>, E>,
-) -> Shape {
+fn offset_result<E: fmt::Display>(operation: &str, result: Result<CurveRegion2, E>) -> Shape {
     match result {
-        Ok(offset) => Shape::CurveRegion2D(offset.into_value()),
+        Ok(offset) => Shape::CurveRegion2D(offset),
         Err(error) => Shape::Failed(format!("exact {operation} failed: {error}")),
     }
 }
@@ -125,12 +119,7 @@ impl Evaluator {
             } else {
                 Some(offset_result(
                     "offset(r=...)",
-                    csgrs::curve::offset(
-                        &region,
-                        r_val,
-                        &OffsetCornerStyle2::Round,
-                        &CurveContext::STRICT,
-                    ),
+                    region.offset(r_val, &OffsetCornerStyle2::Round),
                 ))
             }
         } else if let Some(d_val) = delta {
@@ -139,13 +128,11 @@ impl Evaluator {
             } else {
                 Some(offset_result(
                     "offset(delta=...)",
-                    csgrs::curve::offset(
-                        &region,
+                    region.offset(
                         d_val,
                         &OffsetCornerStyle2::Miter {
                             limit: Real::from(4),
                         },
-                        &CurveContext::STRICT,
                     ),
                 ))
             }
@@ -156,12 +143,7 @@ impl Evaluator {
             } else {
                 Some(offset_result(
                     "offset(...)",
-                    csgrs::curve::offset(
-                        &region,
-                        d,
-                        &OffsetCornerStyle2::Round,
-                        &CurveContext::STRICT,
-                    ),
+                    region.offset(d, &OffsetCornerStyle2::Round),
                 ))
             }
         }
@@ -472,7 +454,7 @@ mod tests {
     fn failed_offset_remains_an_explicit_failed_shape() {
         let shape = offset_result(
             "offset(delta=...)",
-            Err::<CurveOutcome<CurveRegion2>, _>("unsupported topology"),
+            Err::<CurveRegion2, _>("unsupported topology"),
         );
         let Shape::Failed(error) = shape else {
             panic!("an offset failure must not preserve the unchanged input");

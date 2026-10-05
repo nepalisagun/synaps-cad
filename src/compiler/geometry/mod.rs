@@ -2,7 +2,7 @@ use std::fmt;
 
 use csgrs::solid::{self, SolidExt};
 use csgrs::{Real, TriangleMesh};
-use hypercurve::{CurveContext, CurveRegion2};
+use hypercurve::CurveRegion2;
 use hyperlattice::{Matrix4, Point3, Vector3};
 use hypermesh::Plane;
 
@@ -106,12 +106,8 @@ impl Shape {
         }
         match (self, other) {
             (Self::CurveRegion2D(a), Self::CurveRegion2D(b)) => {
-                match a.boolean_region(
-                    &b,
-                    hypercurve::BooleanOp::Union,
-                    &hypercurve::CurveContext::STRICT,
-                ) {
-                    Ok(region) => Self::CurveRegion2D(region.into_value()),
+                match a.boolean_region(&b, hypercurve::BooleanOp::Union) {
+                    Ok(region) => Self::CurveRegion2D(region),
                     Err(error) => Self::Failed(format!("exact 2D union failed: {error}")),
                 }
             }
@@ -132,12 +128,8 @@ impl Shape {
         }
         match (self, other) {
             (Self::CurveRegion2D(a), Self::CurveRegion2D(b)) => {
-                match a.boolean_region(
-                    &b,
-                    hypercurve::BooleanOp::Difference,
-                    &hypercurve::CurveContext::STRICT,
-                ) {
-                    Ok(region) => Self::CurveRegion2D(region.into_value()),
+                match a.boolean_region(&b, hypercurve::BooleanOp::Difference) {
+                    Ok(region) => Self::CurveRegion2D(region),
                     Err(error) => Self::Failed(format!("exact 2D difference failed: {error}")),
                 }
             }
@@ -158,12 +150,8 @@ impl Shape {
         }
         match (self, other) {
             (Self::CurveRegion2D(a), Self::CurveRegion2D(b)) => {
-                match a.boolean_region(
-                    &b,
-                    hypercurve::BooleanOp::Intersection,
-                    &hypercurve::CurveContext::STRICT,
-                ) {
-                    Ok(region) => Self::CurveRegion2D(region.into_value()),
+                match a.boolean_region(&b, hypercurve::BooleanOp::Intersection) {
+                    Ok(region) => Self::CurveRegion2D(region),
                     Err(error) => Self::Failed(format!("exact 2D intersection failed: {error}")),
                 }
             }
@@ -312,9 +300,8 @@ fn transform_curve_region(region: &CurveRegion2, matrix: &Matrix4, operation: &s
         &matrix.0[1][1],
         &matrix.0[0][3],
         &matrix.0[1][3],
-        &CurveContext::STRICT,
     ) {
-        Ok(region) => Shape::CurveRegion2D(region.into_value()),
+        Ok(region) => Shape::CurveRegion2D(region),
         Err(error) => Shape::Failed(format!(
             "{operation} collapsed or invalidated a 2D curve region: {error}"
         )),
@@ -357,13 +344,8 @@ mod tests {
         ])
         .unwrap();
         let curved = Shape::CurveRegion2D(
-            CurveRegion2::try_from_boundary_paths(
-                &[boundary],
-                hypercurve::FillRule::NonZero,
-                &CurveContext::STRICT,
-            )
-            .unwrap()
-            .into_value(),
+            CurveRegion2::try_from_boundary_paths(&[boundary], hypercurve::FillRule::NonZero)
+                .unwrap(),
         );
         let cutter = Shape::CurveRegion2D(csgrs::curve::translated(
             &csgrs::curve::rectangle(Real::from(6), Real::from(3)),

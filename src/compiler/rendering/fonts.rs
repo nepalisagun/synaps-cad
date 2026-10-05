@@ -277,12 +277,7 @@ pub fn render_text_with_direction(
 
             combined = Some(match combined {
                 Some(acc) => acc
-                    .boolean_region(
-                        &positioned,
-                        hypercurve::BooleanOp::Union,
-                        &hypercurve::CurveContext::STRICT,
-                    )
-                    .map(hypercurve::CurveOutcome::into_value)
+                    .boolean_region(&positioned, hypercurve::BooleanOp::Union)
                     .map_err(|error| format!("exact text glyph union failed: {error}"))?,
                 None => positioned,
             });
